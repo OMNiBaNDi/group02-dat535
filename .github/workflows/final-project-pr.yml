@@ -1,0 +1,58 @@
+name: Final project - Pull request
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  pr-fixture:
+    name: PR fixture
+    if: >-
+      github.head_ref == 'dev' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, linux, X64]
+    timeout-minutes: 15
+
+    defaults:
+      run:
+        shell: bash
+
+    env:
+      JAVA_HOME: /usr/lib/jvm/java-8-openjdk-amd64
+      PYTHONDONTWRITEBYTECODE: "1"
+      TEST_RUN_ID: pr-${{ github.event.pull_request.number }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+    steps:
+      - name: Check out the proposed merge revision
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Run configuration tests
+        run: |
+          /home/ubuntu/spark-env/bin/python -B -m unittest discover \
+            -s final_project/tests \
+            -p 'test_*.py' \
+            -v
+
+      - name: Run isolated PR fixture
+        id: fixture
+        run: |
+          bash final_project/scripts/run_fixture.sh \
+            --environment test \
+            --test-run-id "$TEST_RUN_ID"
+
+      - name: Upload this run's logs and reports
+        if: ${{ !cancelled() && steps.fixture.outputs.run_root != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: cp1-pr-${{ github.event.pull_request.number }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.fixture.outputs.run_root }}/logs/
+            ${{ steps.fixture.outputs.run_root }}/reports/
+          if-no-files-found: error
+          retention-days: 30
