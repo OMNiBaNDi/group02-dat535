@@ -19,9 +19,17 @@ Bronze, Silver and Gold entry points currently raise
 publication are not implemented.
 
 Earlier manual VM runs verified fixture success and an intentional
-validation failure with a nonzero launcher exit status. GitHub Actions
-execution, peer review and controlled-production verification remain
-pending. CP1 is not yet accepted.
+validation failure with a nonzero launcher exit status.
+
+The [development workflow run](https://github.com/OMNiBaNDi/group02-dat535/actions/runs/38471697171)
+for commit `44fc15d` passed on 13 October 2026, including all eight
+configuration tests, standalone Spark fixture execution and artifact
+upload. The downloaded reports confirmed development storage,
+Spark/PySpark 3.5.0, expected fixture results and successful Parquet
+read-back. Fixture output remained unpublished.
+
+PR workflow execution, peer review and controlled-production
+verification remain pending. CP1 is not yet accepted.
 
 ## Project layout
 
