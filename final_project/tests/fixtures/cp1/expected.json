@@ -1,0 +1,16 @@
+{
+  "fixture_id": "cp1-group-totals-v1",
+  "input_row_count": 6,
+  "groups": [
+    {
+      "group_id": "alpha",
+      "row_count": 3,
+      "value_sum": 60
+    },
+    {
+      "group_id": "beta",
+      "row_count": 3,
+      "value_sum": 45
+    }
+  ]
+}
