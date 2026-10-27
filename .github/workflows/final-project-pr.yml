@@ -46,6 +46,12 @@ jobs:
             --environment test \
             --test-run-id "$TEST_RUN_ID"
 
+      - name: Run offline CP2 checks
+        id: notebook_checks
+        run: |
+          /home/ubuntu/spark-env/bin/python -B final_project/tests/check_notebook.py \
+            --test-run-id "$TEST_RUN_ID"
+
       - name: Upload this run's logs and reports
         if: ${{ !cancelled() && steps.fixture.outputs.run_root != '' }}
         uses: actions/upload-artifact@v7
@@ -54,5 +60,14 @@ jobs:
           path: |
             ${{ steps.fixture.outputs.run_root }}/logs/
             ${{ steps.fixture.outputs.run_root }}/reports/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload CP2 check report
+        if: ${{ !cancelled() && steps.notebook_checks.outputs.run_root != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: cp2-pr-${{ github.event.pull_request.number }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.notebook_checks.outputs.run_root }}/reports/
           if-no-files-found: error
           retention-days: 30

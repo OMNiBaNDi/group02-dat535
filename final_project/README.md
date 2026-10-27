@@ -35,9 +35,11 @@ read-back. Fixture output remained unpublished.
 Amund merged CP1 at b40b6b8 and verified production and synchronised
 development execution. CP2 acquisition, reuse and both availability checks
 have been verified locally and in a manual VM copy. CP2 is not yet accepted. Terminal notebook execution with NBClient has also
-been checked on the VM. The development workflow now also calls the notebook,
-but its first Actions verification is pending. PR and production workflows
-still run the CP1 fixture only.
+been checked on the VM. The development workflow also runs the notebook and has passed at commit
+`9f51e18`. The PR workflow adds two offline notebook checks using tiny
+generated files in isolated test storage. Production is configured to run the
+notebook with refresh disabled after the CP1 fixture; CP2 production verification
+is still pending.
 
 ## Project layout
 
