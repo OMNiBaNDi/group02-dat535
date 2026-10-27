@@ -1,0 +1,32 @@
+{
+  "profile_version": 2,
+  "status": "provisional",
+  "region": "Alabama",
+  "year": 2025,
+  "ozone_monitor": {
+    "state_code": "01",
+    "county_code": "073",
+    "site_number": "1005",
+    "parameter_code": "44201",
+    "poc": "1"
+  },
+  "weather_mapping": {
+    "epa_site_id": "01-073-1005",
+    "noaa_station_id": "USW00053864"
+  },
+  "temperature_policy": {
+    "version": "temperature-hourly-v1",
+    "status": "provisional",
+    "source_quality_pairs": [
+      [
+        "223",
+        "1"
+      ],
+      [
+        "343",
+        "5"
+      ]
+    ],
+    "hourly_selection": "latest_within_utc_hour"
+  }
+}
