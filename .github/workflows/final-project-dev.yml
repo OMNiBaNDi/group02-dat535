@@ -39,6 +39,11 @@ jobs:
         run: |
           bash final_project/scripts/run_fixture.sh --environment dev
 
+      - name: Run CP2 notebook
+        id: notebook
+        run: |
+          bash final_project/scripts/run_notebook.sh --environment dev
+
       - name: Upload this run's logs and reports
         if: ${{ !cancelled() && steps.fixture.outputs.run_root != '' }}
         uses: actions/upload-artifact@v7
@@ -47,5 +52,14 @@ jobs:
           path: |
             ${{ steps.fixture.outputs.run_root }}/logs/
             ${{ steps.fixture.outputs.run_root }}/reports/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload notebook reports
+        if: ${{ !cancelled() && steps.notebook.outputs.run_root != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: cp2-dev-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.notebook.outputs.run_root }}/reports/
           if-no-files-found: error
           retention-days: 30

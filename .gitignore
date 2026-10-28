@@ -1,3 +1,11 @@
 # Generated Python bytecode and cache directories.
 __pycache__/
 *.pyc
+aqs_sites.csv
+aqs_monitors.csv
+hourly_44201_2025.csv
+ghcnh-station-list.csv
+source_data/
+
+# Local notebook storage paths; the VM uses environments.json.
+final_project/config/environments.local.json
