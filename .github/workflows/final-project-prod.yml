@@ -40,7 +40,7 @@ jobs:
         run: |
           bash final_project/scripts/run_fixture.sh --environment prod
 
-      - name: Run CP2 notebook
+      - name: Run project notebook
         id: notebook
         run: |
           bash final_project/scripts/run_notebook.sh --environment prod
@@ -56,11 +56,20 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Upload notebook reports
+      - name: Upload Bronze reports and executed notebook
         if: ${{ !cancelled() && steps.notebook.outputs.run_root != '' }}
         uses: actions/upload-artifact@v7
         with:
-          name: cp2-prod-${{ github.run_id }}-${{ github.run_attempt }}
+          name: notebook-prod-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ steps.notebook.outputs.run_root }}/reports/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload Silver reports
+        if: ${{ !cancelled() && steps.notebook.outputs.silver_reports_dir != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: silver-prod-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.notebook.outputs.silver_reports_dir }}
           if-no-files-found: error
           retention-days: 30
