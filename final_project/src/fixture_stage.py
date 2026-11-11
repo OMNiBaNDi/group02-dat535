@@ -8,14 +8,13 @@ from pyspark.sql import SparkSession
 
 from fixture_processing import build_fixture_totals, verify_fixture_totals
 from run_context import RunContext
-from stages import StageResult
 
 
 def run_fixture(
     spark: SparkSession,
     context: RunContext,
     fixture_dir: Path,
-) -> StageResult:
+) -> tuple[Path, Path]:
     started = perf_counter()
 
     expected = json.loads(
@@ -76,8 +75,4 @@ def run_fixture(
         json.dump(report, handle, indent=2)
         handle.write("\n")
 
-    return StageResult(
-        stage="fixture",
-        output_paths=(output_path,),
-        report_path=report_path,
-    )
+    return report_path, output_path
