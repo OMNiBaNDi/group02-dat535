@@ -136,10 +136,10 @@ def main() -> int:
         if spark.version != pyspark.__version__:
             raise ValueError("Spark engine and imported PySpark versions differ.")
 
-        result = run_fixture(spark, context, args.fixture_dir)
+        fixture_report, output_path = run_fixture(spark, context, args.fixture_dir)
 
-        report["fixture_report"] = str(result.report_path)
-        report["output_paths"] = [str(path) for path in result.output_paths]
+        report["fixture_report"] = str(fixture_report)
+        report["output_paths"] = [str(output_path)]
         report["status"] = "success"
 
     except Exception as error:
