@@ -46,6 +46,9 @@ jobs:
             --environment test \
             --test-run-id "$TEST_RUN_ID"
 
+      - name: Run isolated Gold Spark checks
+        run: /home/ubuntu/spark-env/bin/python -B final_project/tests/gold_checks.py
+
       - name: Check notebook syntax, input columns and configuration
         id: notebook_checks
         run: |

@@ -1,6 +1,7 @@
-"""Run the project notebook and expose its Bronze and Silver report paths."""
+"""Run the project notebook and expose its Bronze, Silver and Gold report paths."""
 
 import argparse
+import json
 import os
 from pathlib import Path
 
@@ -42,10 +43,11 @@ def main():
         resources={"metadata": {"path": str(project_dir)}},
     )
     report_path = None
-    silver_completion_paths = {}
-    silver_completion_names = {
+    completion_paths = {}
+    completion_names = {
         "source_silver_completion.json",
         "hourly_silver_completion.json",
+        "gold_completion.json",
     }
     print(f"Starting notebook: {args.environment}", flush=True)
     try:
@@ -65,8 +67,8 @@ def main():
                     report_path = Path(line.removeprefix("Run report: "))
                 elif line.startswith("Completion report: "):
                     completion_path = Path(line.removeprefix("Completion report: "))
-                    if completion_path.name in silver_completion_names:
-                        silver_completion_paths[completion_path.name] = completion_path
+                    if completion_path.name in completion_names:
+                        completion_paths[completion_path.name] = completion_path
 
         if report_path is not None:
             executed_path = report_path.parent / "pipeline.executed.ipynb"
@@ -74,10 +76,10 @@ def main():
             print("Execution copy saved:", executed_path)
 
             silver_report_dirs = {
-                path.parent for path in silver_completion_paths.values()
+                path.parent for path in completion_paths.values()
             }
             if len(silver_report_dirs) > 1:
-                raise RuntimeError("Silver completion reports belong to different runs.")
+                raise RuntimeError("Silver and Gold completion reports belong to different runs.")
             silver_reports_dir = next(iter(silver_report_dirs), None)
             if silver_reports_dir is not None:
                 if not silver_reports_dir.is_dir():
@@ -101,11 +103,25 @@ def main():
 
     if report_path is None:
         raise RuntimeError("Notebook finished without an acquisition run report.")
-    missing_reports = silver_completion_names - silver_completion_paths.keys()
+    missing_reports = completion_names - completion_paths.keys()
     if missing_reports:
         raise RuntimeError(
-            f"Notebook finished without Silver completion reports: {sorted(missing_reports)}"
+            f"Notebook finished without required completion reports: {sorted(missing_reports)}"
         )
+    gold = json.loads(completion_paths["gold_completion.json"].read_text(encoding="utf-8"))
+    hourly = json.loads(completion_paths["hourly_silver_completion.json"].read_text(encoding="utf-8"))
+    if (
+        gold["status"] != "success" or hourly["status"] != "success"
+        or gold["environment"] != args.environment or hourly["environment"] != args.environment
+        or gold["run_id"] != hourly["run_id"]
+        or gold["run_id"] != completion_paths["gold_completion.json"].parent.parent.name
+        or gold["parent_hourly"] != {key: hourly[key] for key in (
+            "publication_id", "manifest_path", "manifest_sha256"
+        )}
+    ):
+        raise RuntimeError("Gold completion does not match this run's hourly Silver release.")
+    if not completion_paths["source_silver_completion.json"].is_file():
+        raise FileNotFoundError(completion_paths["source_silver_completion.json"])
     print("Notebook finished successfully.")
     return 0
 

@@ -1,0 +1,15 @@
+{
+  "rule_version": "gold-period-v1",
+  "threshold_ppm": 0.045,
+  "comparison": ">=",
+  "minimum_hours": 3,
+  "calibration": {
+    "monitor_id": "01-073-1005-44201-1",
+    "year": 2025,
+    "method": "nearest-rank P90 of eligible hourly ozone readings",
+    "eligible_hours": 5071,
+    "rank": 4564,
+    "publication_id": "fbded6da307ef9c839adba6becfd98942e6143816ef144cc3e93043a61bd645a",
+    "manifest_sha256": "a1fae588677568504ad2223ffc181459e7f69b5841398e457c2e53a0de7c0174"
+  }
+}
