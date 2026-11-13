@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   development-fixture:
-    name: Development fixture
+    name: Development pipeline
     runs-on: [self-hosted, linux, X64]
     timeout-minutes: 15
 
@@ -39,7 +39,7 @@ jobs:
         run: |
           bash final_project/scripts/run_fixture.sh --environment dev
 
-      - name: Run project notebook
+      - name: Run Bronze, Silver and Gold notebook
         id: notebook
         run: |
           bash final_project/scripts/run_notebook.sh --environment dev
@@ -64,11 +64,11 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Upload Silver reports
+      - name: Upload Silver and Gold reports
         if: ${{ !cancelled() && steps.notebook.outputs.silver_reports_dir != '' }}
         uses: actions/upload-artifact@v7
         with:
-          name: silver-dev-${{ github.run_id }}-${{ github.run_attempt }}
+          name: silver-gold-dev-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ steps.notebook.outputs.silver_reports_dir }}
           if-no-files-found: error
           retention-days: 30
