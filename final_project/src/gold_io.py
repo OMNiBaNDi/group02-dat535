@@ -59,7 +59,7 @@ def gold_release_inputs(context, parent, parent_path, parent_sha256, rules, rule
 
     saved_rules = load_gold_rules(rule_path)
     if rules != saved_rules:
-        raise ValueError("Gold publication requires the primary rules saved in the config.")
+        raise ValueError("Gold publication requires the rules in the selected config.")
 
     return {
         "parent_hourly": {
@@ -97,13 +97,20 @@ def check_gold_coverage(monthly, catalogue):
 
 def publish_gold(
     *, catalogue, monthly,
-    rules, parent, parent_path, parent_sha256, context,
+    rules, parent, parent_path, parent_sha256, context, rule_path=None,
 ):
     """Stage both Gold tables and publish their manifest after validation."""
     project = Path(__file__).resolve().parents[1]
+    primary_path = project / "config/gold_rules.json"
+    if rule_path is None:
+        rule_path = primary_path
+    elif rule_path != primary_path:
+        primary = load_gold_rules(primary_path)
+        if rules != primary and rules["rule_version"] == primary["rule_version"]:
+            raise ValueError("Give the changed Gold rule its own rule_version.")
     inputs = gold_release_inputs(
         context, parent, parent_path, parent_sha256, rules,
-        project / "config/gold_rules.json",
+        rule_path,
     )
     coverage = check_gold_coverage(monthly, catalogue)
 

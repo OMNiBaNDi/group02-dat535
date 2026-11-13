@@ -1,0 +1,10 @@
+{
+  "rule_version": "gold-threshold-demo-v1",
+  "threshold_ppm": 0.046,
+  "comparison": ">=",
+  "minimum_hours": 3,
+  "calibration": {
+    "method": "Sensitivity example: raise the primary cutoff by 0.001 ppm.",
+    "primary_rule_version": "gold-period-v1"
+  }
+}
