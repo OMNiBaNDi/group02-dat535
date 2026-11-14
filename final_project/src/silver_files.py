@@ -1,4 +1,4 @@
-"""File identity and contained paths shared by Silver readers and publishers."""
+"""Shared helpers for file checksums and paths that stay inside the data folder."""
 
 import hashlib
 import json
@@ -6,7 +6,8 @@ from pathlib import Path
 
 
 def file_sha256(path):
-    # The ozone CSV is large, so read it a chunk at a time.
+    """Return a file checksum without reading the entire file into memory."""
+    # Read large files in chunks so checksum calculation uses little memory.
     checksum = hashlib.sha256()
     with path.open("rb") as handle:
         while True:
@@ -18,6 +19,8 @@ def file_sha256(path):
 
 
 def silver_json_sha256(value):
+    """Hash JSON with sorted object keys and consistent spacing."""
+    # Dictionary insertion order should not change the metadata checksum.
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
@@ -28,6 +31,7 @@ def silver_child_path(base, relative, *, must_exist=False):
     relative = Path(relative)
     if relative.is_absolute() or ".." in relative.parts:
         raise ValueError(f"Expected a contained relative path: {relative}")
+    # Resolve symbolic links too, so a relative path cannot lead outside the base folder.
     result = (base / relative).resolve(strict=must_exist)
     if result == base or not result.is_relative_to(base):
         raise ValueError(f"Path is outside its base directory: {result}")
@@ -46,6 +50,7 @@ def verify_silver_file_inventory(bundle, datasets):
             silver_child_path(bundle, item["path"], must_exist=True)
             for item in info["files"]
         ]
+        # Require a complete, nonduplicated list of Parquet files in the expected dataset directory.
         if (
             not paths
             or len(paths) != len(set(paths))
@@ -61,6 +66,7 @@ def verify_silver_file_inventory(bundle, datasets):
         ):
             raise ValueError(f"{name}: the Parquet file inventory differs.")
 
+        # Check both file sizes and hashes; changed contents may still have the same length.
         for path, item in zip(paths, info["files"]):
             if (
                 path.stat().st_size != item["bytes"]

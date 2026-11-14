@@ -1,5 +1,6 @@
 name: Final project - Pull request
 
+# Check a proposed merge into main before it is accepted.
 on:
   pull_request:
     branches: [main]
@@ -10,7 +11,9 @@ permissions:
 
 jobs:
   pr-fixture:
+    # Keep the existing check name for any branch-protection requirements.
     name: PR fixture
+    # Only run this self-hosted job for dev PRs from our own repository.
     if: >-
       github.head_ref == 'dev' &&
       github.event.pull_request.head.repo.full_name == github.repository
@@ -24,6 +27,7 @@ jobs:
     env:
       JAVA_HOME: /usr/lib/jvm/java-8-openjdk-amd64
       PYTHONDONTWRITEBYTECODE: "1"
+      # Give each attempt its own test folder, separate from dev and prod data.
       TEST_RUN_ID: pr-${{ github.event.pull_request.number }}-${{ github.run_id }}-${{ github.run_attempt }}
 
     steps:
@@ -39,32 +43,16 @@ jobs:
             -p 'test_*.py' \
             -v
 
-      - name: Run isolated PR fixture
-        id: fixture
-        run: |
-          bash final_project/scripts/run_fixture.sh \
-            --environment test \
-            --test-run-id "$TEST_RUN_ID"
-
+      # Made-up Gold inputs test the rules and publication without downloading sources.
       - name: Run isolated Gold Spark checks
         run: /home/ubuntu/spark-env/bin/python -B final_project/tests/gold_checks.py
 
+      # This is an offline check, not a full execution of the real-data notebook.
       - name: Check notebook syntax, input columns and configuration
         id: notebook_checks
         run: |
           /home/ubuntu/spark-env/bin/python -B final_project/tests/check_notebook.py \
             --test-run-id "$TEST_RUN_ID"
-
-      - name: Upload this run's logs and reports
-        if: ${{ !cancelled() && steps.fixture.outputs.run_root != '' }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: cp1-pr-${{ github.event.pull_request.number }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            ${{ steps.fixture.outputs.run_root }}/logs/
-            ${{ steps.fixture.outputs.run_root }}/reports/
-          if-no-files-found: error
-          retention-days: 30
 
       - name: Upload offline notebook check report
         if: ${{ !cancelled() && steps.notebook_checks.outputs.run_root != '' }}

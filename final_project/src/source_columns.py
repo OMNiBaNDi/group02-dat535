@@ -28,7 +28,9 @@ required_columns = {
 }
 
 def check_columns(source, columns):
+    """Return compatible/blocked status and missing-column details for a source header."""
     required = required_columns[(source["source"], source["dataset"])]
+    # Check the minimum header needed downstream. Value checks happen later in Silver.
     missing = sorted(set(required) - set(columns))
     return {
         "contract_version": "bronze-columns-v2",

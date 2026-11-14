@@ -1,4 +1,8 @@
-"""Save and reload the project's Gold tables."""
+"""Save and reload the project's Gold tables.
+
+The catalogue and monthly coverage are saved together as one release. Its
+manifest lists the files, checksums, Gold rule and hourly Silver input (parent).
+The manifest is published last, so readers do not see a half-written release."""
 
 import json
 from pathlib import Path
@@ -10,7 +14,8 @@ from silver_files import file_sha256, silver_child_path, silver_json_sha256, ver
 
 
 def stage_gold_table(table, bundle: Path, name: str) -> dict:
-    """Write one Gold table to Parquet and verify its contents after reloading."""
+    """Write one table, check its reloaded schema and return row counts and file checksums."""
+    # Write to a new staging directory without replacing existing output.
     directory = bundle / name
     table.write.mode("errorifexists").parquet(str(directory))
 
@@ -18,10 +23,13 @@ def stage_gold_table(table, bundle: Path, name: str) -> dict:
     if not files:
         raise ValueError(f"{name}: Spark wrote no Parquet files.")
 
+    # Check that saving preserved column names, order and types. The fixture tests
+    # compare values too; this production step records file hashes and row counts.
     saved = table.sparkSession.read.parquet(*(str(path) for path in files))
     if saved.dtypes != table.dtypes:
         raise ValueError(f"{name}: column names, order or types changed after saving.")
 
+    # Record actual file paths, sizes and hashes for the publication loader.
     inventory = [
         {
             "path": path.relative_to(bundle).as_posix(),
@@ -39,7 +47,7 @@ def stage_gold_table(table, bundle: Path, name: str) -> dict:
     }
 
 def gold_release_inputs(context, parent, parent_path, parent_sha256, rules, rule_path):
-    """Record the verified hourly Silver parent and the primary Gold rule."""
+    """Verify the selected hourly Silver manifest and saved Gold rule, then return their identities."""
     root = Path(context.environment_root).resolve()
     path = silver_child_path(root, parent_path, must_exist=True)
 
@@ -48,6 +56,7 @@ def gold_release_inputs(context, parent, parent_path, parent_sha256, rules, rule
     if file_sha256(path) != parent_sha256:
         raise ValueError("The hourly Silver manifest checksum has changed.")
 
+    # Require the saved Silver parent to equal the verified one used for the calculation.
     saved_parent = json.loads(path.read_text(encoding="utf-8"))
     if (
         saved_parent != parent
@@ -57,6 +66,7 @@ def gold_release_inputs(context, parent, parent_path, parent_sha256, rules, rule
     ):
         raise ValueError("The saved Silver manifest differs from the verified Gold input.")
 
+    # Match the in-memory rule to its selected config, including an alternative Analyse rule.
     saved_rules = load_gold_rules(rule_path)
     if rules != saved_rules:
         raise ValueError("Gold publication requires the rules in the selected config.")
@@ -75,6 +85,7 @@ def check_gold_coverage(monthly, catalogue):
     """Check that the release tables account for the same hours and periods."""
     from pyspark.sql import functions as F
 
+    # Sum monthly counts independently of the catalogue durations and period count.
     totals = monthly.agg(
         F.count("*").alias("months"),
         F.coalesce(F.sum("elevated_hours"), F.lit(0)).alias("elevated_hours"),
@@ -87,6 +98,7 @@ def check_gold_coverage(monthly, catalogue):
         F.coalesce(F.sum("duration_hours"), F.lit(0)).alias("member_hours"),
     ).first()
 
+    # Both outputs must account for the same number of qualifying hours and periods.
     if (
         totals.member_hours != periods.member_hours
         or totals.periods != periods.periods
@@ -100,6 +112,7 @@ def publish_gold(
     rules, parent, parent_path, parent_sha256, context, rule_path=None,
 ):
     """Stage both Gold tables and publish their manifest after validation."""
+    # Default to the primary rule. A changed alternative rule needs its own version label.
     project = Path(__file__).resolve().parents[1]
     primary_path = project / "config/gold_rules.json"
     if rule_path is None:
@@ -108,6 +121,7 @@ def publish_gold(
         primary = load_gold_rules(primary_path)
         if rules != primary and rules["rule_version"] == primary["rule_version"]:
             raise ValueError("Give the changed Gold rule its own rule_version.")
+    # Check the saved parent and rule, then reconcile the two prepared outputs.
     inputs = gold_release_inputs(
         context, parent, parent_path, parent_sha256, rules,
         rule_path,
@@ -122,6 +136,7 @@ def publish_gold(
     release_dir.mkdir(parents=True, exist_ok=True)
     context.staging_root.mkdir(parents=True, exist_ok=True)
 
+    # Stage both tables before publishing. A write failure here leaves no new release manifest.
     with TemporaryDirectory(prefix="gold-", dir=context.staging_root) as scratch:
         scratch = Path(scratch)
         bundle = scratch / "tables"
@@ -136,6 +151,7 @@ def publish_gold(
             raise ValueError("Staged Gold row counts differ from the prepared outputs.")
         verify_silver_file_inventory(bundle, datasets)
 
+        # Record the selected rule, exact Silver parent, file inventory and code used for this run.
         metadata = {
             "manifest_version": 1,
             "kind": "gold",
@@ -164,21 +180,25 @@ def publish_gold(
             },
         }
 
+        # Run and file metadata contribute to the ID; equal analytical results can have different IDs.
         release_id = silver_json_sha256(metadata)
         bundle_path = f"data/gold/{region}/{year}/{release_id}"
         destination = silver_child_path(root, bundle_path)
         manifest_path = release_dir / release_id / "manifest.json"
         manifest = {**metadata, "publication_id": release_id, "bundle_path": bundle_path}
 
-        # Prepare the manifest on the staging filesystem before moving either output.
+        # Prepare the manifest beside the staged tables before moving them to their final paths.
         pending = scratch / "manifest.json"
         pending.write_text(json.dumps(manifest, indent=2, allow_nan=False) + "\n", encoding="utf-8")
 
+        # Only one publisher can enter this block at a time. This prevents two runs
+        # from changing the release paths together; closing the file releases the lock.
         with (release_dir / ".publish.lock").open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             destination.parent.mkdir(parents=True, exist_ok=True)
             manifest_path.parent.mkdir(parents=True, exist_ok=True)
 
+            # Verify an existing identical release, or place the data and write its manifest last.
             if manifest_path.exists():
                 if json.loads(manifest_path.read_text(encoding="utf-8")) != manifest:
                     raise ValueError("An existing Gold manifest has different contents.")
@@ -196,6 +216,7 @@ def publish_gold(
 
 def load_gold(manifest_path, *, expected_sha256, expected_parent_sha256, context, spark):
     """Verify a selected Gold release and read its listed Parquet files."""
+    # Load the explicitly selected release, not whichever directory is newest.
     root = context.environment_root
     path = Path(manifest_path).resolve(strict=True)
     if not path.is_relative_to(root / "published/gold") or file_sha256(path) != expected_sha256:
@@ -203,6 +224,7 @@ def load_gold(manifest_path, *, expected_sha256, expected_parent_sha256, context
 
     manifest = json.loads(path.read_text(encoding="utf-8"))
     release_id = manifest["publication_id"]
+    # Recalculate the release ID from its recorded metadata and check the directory layout.
     metadata = {k: v for k, v in manifest.items() if k not in ("publication_id", "bundle_path")}
     suffix = f"gold/{manifest['region']}/{manifest['year']}/{release_id}"
     if (
@@ -215,6 +237,8 @@ def load_gold(manifest_path, *, expected_sha256, expected_parent_sha256, context
     ):
         raise ValueError("Gold manifest identity is inconsistent.")
 
+    # Confirm this Gold release names the expected hourly Silver input.
+    # This checks its manifest; checking the Silver tables is the hourly loader's job.
     parent = manifest["parent_hourly"]
     parent_path = silver_child_path(root, parent["manifest_path"], must_exist=True)
     if (
@@ -228,6 +252,7 @@ def load_gold(manifest_path, *, expected_sha256, expected_parent_sha256, context
         raise ValueError("Gold release must contain the catalogue and monthly coverage.")
 
     bundle = silver_child_path(root, manifest["bundle_path"], must_exist=True)
+    # Verify file hashes, then compare reloaded schemas and counts with the manifest.
     files = verify_silver_file_inventory(bundle, datasets)
     tables = {}
     for name, paths in files.items():
@@ -241,6 +266,7 @@ def load_gold(manifest_path, *, expected_sha256, expected_parent_sha256, context
 
 def write_gold_completion(context, manifest, release, write_json):
     """Write the receipt after load_gold has verified both tables."""
+    # Save the release location and checksum so the runner and later runs can find it.
     path = context.reports_dir / "gold_completion.json"
     write_json(path, {
         "status": "success",

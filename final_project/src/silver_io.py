@@ -1,4 +1,8 @@
-"""Read versioned Silver bundles and verify their identity, evidence and files."""
+"""Open a selected Silver release and check its saved data.
+
+The manifest describes the release: its input, rules, tables and file checksums.
+Source Silver contains cleaned observations and references plus rejection audits.
+Hourly Silver adds the weather match and calendar coverage used by Gold."""
 
 import json
 from pathlib import Path
@@ -9,6 +13,7 @@ from silver_files import file_sha256, silver_child_path, silver_json_sha256, ver
 from silver_hourly import usable_hourly_key
 
 
+# These columns identify one row in each of the six hourly tables.
 hourly_output_keys = {
     "yearly_mapping": ["monitor_id", "valid_from_utc"],
     "temperature_hourly": ["station_id", "hour_start_utc"],
@@ -24,6 +29,7 @@ def load_source_silver(
     spark, expected_manifest_sha256, profile, rule_versions,
 ):
     """Load only the files listed in a validated source Silver manifest."""
+    # Use the explicitly selected manifest and checksum; do not search for the latest release.
     root = Path(context.environment_root).resolve()
     manifest_path = Path(manifest_path).resolve(strict=True)
     if (
@@ -43,6 +49,7 @@ def load_source_silver(
     validation = manifest["validation"]
     datasets = manifest["datasets"]
     contracts = manifest["contracts"]
+    # Source Silver contains five clean tables and three audits.
     names = {
         "ozone_observations", "temperature_reports",
         "epa_sites", "epa_monitors", "noaa_stations",
@@ -51,6 +58,7 @@ def load_source_silver(
     clean_names = names - {
         "ozone_audit", "temperature_audit", "reference_audit"
     }
+    # Require the profile, rules and recorded validation to describe the same bundle.
     contract_hash = silver_json_sha256(contracts)
     if (
         manifest["manifest_version"] != 1
@@ -75,6 +83,7 @@ def load_source_silver(
             "The manifest does not match the requested source Silver bundle."
         )
 
+    # Check that saved audit totals account for the input and agree with clean output counts.
     for name, check in validation["audits"].items():
         if (
             check["status"] != "passed"
@@ -87,6 +96,7 @@ def load_source_silver(
                 f"{name}: manifest audit counts do not reconcile."
             )
 
+    # Require the manifest and data paths to match the recorded region, year and release ID.
     region = profile["region"].strip().lower().replace(" ", "_")
     suffix = (
         f"silver/source/{region}/{profile['year']}/"
@@ -105,9 +115,11 @@ def load_source_silver(
     bundle = silver_child_path(
         root, manifest["bundle_path"], must_exist=True
     )
+    # Verify every recorded file's size and checksum before Spark reads it.
     files = verify_silver_file_inventory(bundle, datasets)
     tables, counts = {}, {}
 
+    # Reopen each table and check its schema and count against the saved contract.
     for name in sorted(names):
         info, contract = datasets[name], contracts[name]
         check = validation["datasets"][name]
@@ -156,6 +168,8 @@ def load_source_silver(
 
 def check_hourly_evidence(evidence):
     """Require acceptance bound to the prepared profile, rules and source."""
+    # Approval is a separate recorded decision, not the profile's status field.
+    # Require it to match this profile, mapping, source, rules and observed coverage.
     acceptance = evidence["acceptance"]
     mapping = evidence["mapping"]
     profile = evidence["profile"]
@@ -194,6 +208,7 @@ def check_hourly_evidence(evidence):
 
 
 def hourly_expected_rows(evidence):
+    """Return expected table row counts from the recorded preparation checks."""
     checks = evidence["checks"]
     return {
         "yearly_mapping": 1,
@@ -208,8 +223,9 @@ def hourly_expected_rows(evidence):
 
 
 def verify_hourly_records(table, name, keys, stored_count, expected_count):
-    """Decode all fields and verify cardinality and composite keys in one aggregation."""
-    # Decode all columns; a count alone may read only Parquet metadata.
+    """Read all columns, check row counts and require usable, unique combined keys."""
+    # Build a JSON value from every row to make Spark read all column values.
+    # A row count alone may use only Parquet metadata and miss unreadable values.
     encoded = F.to_json(
         F.struct(*[F.col(column) for column in table.columns]),
         options={"ignoreNullFields": "false"},
@@ -229,12 +245,13 @@ def verify_hourly_records(table, name, keys, stored_count, expected_count):
 
 
 def read_hourly_files(bundle, datasets, contracts, *, spark, expected=None):
-    """Verify every stored field, row count and key before returning tables."""
+    """Verify files, schemas, counts and keys; compare full values when expected tables are supplied."""
     if set(datasets) != set(contracts) or set(contracts) != set(hourly_output_keys):
         raise ValueError("The hourly bundle must contain all six datasets.")
     if spark.conf.get("spark.sql.session.timeZone") != "UTC":
         raise ValueError("Hourly Silver requires UTC.")
 
+    # Verify the complete file list, rather than reading whatever files happen to be present.
     paths = verify_silver_file_inventory(bundle, datasets)
     tables, checks = {}, {}
 
@@ -255,11 +272,14 @@ def read_hourly_files(bundle, datasets, contracts, *, spark, expected=None):
         ):
             raise ValueError(f"{name}: schema or key contract differs.")
 
+        # Reuse the reloaded table across count, key and optional value comparisons.
         table.cache()
         try:
             count = verify_hourly_records(
                 table, name, contract["key"], info["row_count"], contract["expected_rows"]
             )
+            # At publication, compare all rows in both directions with the prepared output.
+            # exceptAll retains duplicate counts, so repeated rows cannot hide a mismatch.
             if expected is not None:
                 reference = expected[name].select(*table.columns)
                 if (
@@ -271,6 +291,7 @@ def read_hourly_files(bundle, datasets, contracts, *, spark, expected=None):
                         f"{name}: persisted values differ from preparation."
                     )
 
+            # Record whether this invocation also compared against the prepared table values.
             checks[name] = {
                 "status": "passed",
                 "records": count,
@@ -289,6 +310,7 @@ def load_hourly_silver(
     manifest_path, context, *, spark, expected_manifest_sha256, profile,
 ):
     """Load an explicitly selected hourly publication for downstream use."""
+    # Check the requested manifest path and checksum before trusting its metadata.
     root = Path(context.environment_root).resolve()
     path = Path(manifest_path).resolve(strict=True)
     if (
@@ -304,6 +326,7 @@ def load_hourly_silver(
     contracts = manifest["contracts"]
     check_hourly_evidence(evidence)
 
+    # Recalculate the release ID and check that stage, evidence and validation agree.
     expected_id = silver_json_sha256({
         "stage_sha256": manifest["stage_sha256"],
         "evidence_sha256": silver_json_sha256(evidence),
@@ -343,6 +366,7 @@ def load_hourly_silver(
             "The publication is in an unexpected location."
         )
 
+    # Reopen the exact source Silver parent as well as checking the hourly release.
     source = evidence["source"]
     parent, _, _ = load_source_silver(
         silver_child_path(
@@ -359,6 +383,7 @@ def load_hourly_silver(
             "The source Silver publication identity differs."
         )
 
+    # Reload the six tables without an in-memory preparation to compare against.
     tables, checks = read_hourly_files(
         silver_child_path(
             root, manifest["bundle_path"], must_exist=True
@@ -367,6 +392,8 @@ def load_hourly_silver(
         contracts,
         spark=spark,
     )
+    # Require evidence that publication compared every value with the prepared tables.
+    # On this reload, verify the saved files and counts without rebuilding Silver.
     for name, actual in checks.items():
         recorded = validation["datasets"][name]
         if (

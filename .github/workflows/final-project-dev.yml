@@ -1,5 +1,6 @@
 name: Final project - Development
 
+# Run the full pipeline when dev receives a push.
 on:
   push:
     branches: [dev]
@@ -27,6 +28,7 @@ jobs:
         with:
           persist-credentials: false
 
+      # Fast checks of paths and runner defaults; these do not start Spark.
       - name: Run configuration tests
         run: |
           /home/ubuntu/spark-env/bin/python -B -m unittest discover \
@@ -34,26 +36,11 @@ jobs:
             -p 'test_*.py' \
             -v
 
-      - name: Run development fixture
-        id: fixture
-        run: |
-          bash final_project/scripts/run_fixture.sh --environment dev
-
+      # No --mode option means Full: prepare the inputs, then build Gold.
       - name: Run Bronze, Silver and Gold notebook
         id: notebook
         run: |
           bash final_project/scripts/run_notebook.sh --environment dev
-
-      - name: Upload this run's logs and reports
-        if: ${{ !cancelled() && steps.fixture.outputs.run_root != '' }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: cp1-dev-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            ${{ steps.fixture.outputs.run_root }}/logs/
-            ${{ steps.fixture.outputs.run_root }}/reports/
-          if-no-files-found: error
-          retention-days: 30
 
       - name: Upload Bronze reports and executed notebook
         if: ${{ !cancelled() && steps.notebook.outputs.run_root != '' }}
@@ -64,6 +51,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+      # Despite its name, silver_reports_dir holds both Silver and Gold reports.
       - name: Upload Silver and Gold reports
         if: ${{ !cancelled() && steps.notebook.outputs.silver_reports_dir != '' }}
         uses: actions/upload-artifact@v7

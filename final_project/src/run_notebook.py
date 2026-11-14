@@ -1,4 +1,8 @@
-"""Run the project notebook and expose its Bronze, Silver and Gold report paths."""
+"""Run the saved notebook on the VM and collect its reports.
+
+Full runs Bronze, Silver and Gold. Prepare stops after hourly Silver. Analyse
+loads a selected hourly Silver release and runs Gold without preparing inputs.
+A completion receipt is the small JSON report that identifies a finished release."""
 
 import argparse
 import json
@@ -6,6 +10,7 @@ import os
 from pathlib import Path
 
 def build_parser():
+    """Define runner options; Full without source refresh remains the default."""
     parser = argparse.ArgumentParser(description="Run the project notebook on the VM.")
     parser.add_argument("--environment", required=True, choices=("dev", "test", "prod"))
     parser.add_argument("--test-run-id", help="Required for the test environment.")
@@ -17,9 +22,11 @@ def build_parser():
 
 
 def main():
+    """Execute the selected notebook mode, save its executed copy and verify completion receipts."""
     parser = build_parser()
     args = parser.parse_args()
 
+    # Reject inconsistent options before starting a notebook kernel.
     if args.mode == "analyse" and not args.hourly_receipt:
         parser.error("analyse requires --hourly-receipt")
     if args.mode != "analyse" and args.hourly_receipt:
@@ -36,6 +43,8 @@ def main():
     from nbclient import NotebookClient
 
     project_dir = Path(__file__).resolve().parents[1]
+    # Pass explicit settings to the fresh kernel. Clear optional values when not selected
+    # so old shell settings cannot accidentally choose another receipt or rule.
     os.environ.update(
         PIPELINE_TARGET="vm",
         PIPELINE_ENVIRONMENT=args.environment,
@@ -54,6 +63,8 @@ def main():
     else:
         os.environ.pop("PIPELINE_TEST_RUN_ID", None)
 
+    # IDs identify the required cells even if their position changes. Keep these IDs
+    # when editing the notebook, since Prepare and Analyse depend on them.
     notebook = nbformat.read(project_dir / "notebooks/pipeline.ipynb", as_version=4)
     if args.mode == "analyse":
         cells = notebook.cells
@@ -61,6 +72,7 @@ def main():
         gold_start = ids.index("68585365")   # Section 10 heading
         gold_end = ids.index("8f313e77")     # Publish and reload Gold
 
+        # Analyse needs only setup and Gold. Bronze and Silver preparation are omitted.
         setup_ids = [
             "configuration",
             "8f038332",           # Start Spark and create this run's context
@@ -69,16 +81,19 @@ def main():
         ]
         notebook.cells = [cells[ids.index(cell_id)] for cell_id in setup_ids]
         notebook.cells += cells[gold_start:gold_end + 1]
+    # Prepare keeps the notebook through the successful hourly Silver receipt and stops before Gold.
     elif args.mode == "prepare":
         ids = [cell.id for cell in notebook.cells]
         silver_end = ids.index("483e66f4")  # Section 9.4d: reload hourly Silver
         notebook.cells = notebook.cells[:silver_end + 1]
 
+    # Remove old outputs from the execution copy so results shown in this run are newly produced.
     for cell in notebook.cells:
         if cell.cell_type == "code":
             cell.outputs = []
             cell.execution_count = None
 
+    # Start the existing spark-env kernel with final_project as its working directory.
     client = NotebookClient(
         notebook,
         kernel_name="spark-env",
@@ -96,7 +111,8 @@ def main():
     try:
         client.execute()
     finally:
-        # Discover this execution's report paths from its captured output.
+        # The notebook prints report paths. Collect them even after a failure,
+        # so an executed copy can be saved when a report location is available.
         for cell in notebook.cells:
             stream_parts = []
             for output in cell.get("outputs", []):
@@ -112,6 +128,7 @@ def main():
                     completion_path = Path(line.removeprefix("Completion report: "))
                     if completion_path.name in completion_names:
                         completion_paths[completion_path.name] = completion_path
+        # Analyse has no Bronze report; use its new Gold receipt as the execution-output location.
         if args.mode == "analyse":
             report_path = completion_paths.get("gold_completion.json")
         if report_path is not None:
@@ -119,6 +136,7 @@ def main():
             nbformat.write(notebook, executed_path)
             print("Execution copy saved:", executed_path)
 
+            # Silver and Gold receipts from this execution must belong to one report directory.
             silver_report_dirs = {
                 path.parent for path in completion_paths.values()
             }
@@ -130,7 +148,8 @@ def main():
                     raise FileNotFoundError(silver_reports_dir)
                 print("Silver reports:", silver_reports_dir)
 
-            # Keep the Bronze outputs and expose the separate Silver report directory.
+            # Tell Actions where to find this run's reports for artifact uploads.
+            # silver_reports_dir also contains Gold reports when Gold has run.
             github_output = os.environ.get("GITHUB_OUTPUT")
             if github_output:
                 run_root = report_path.parent.parent
@@ -144,6 +163,7 @@ def main():
                         handle.write(f"{name}={value}\n")
         else:
             print("No acquisition run report was produced.")
+    # Verify that the new Gold receipt refers to the exact selected Silver release.
     if args.mode == "analyse":
         if report_path is None or not report_path.is_file():
             raise RuntimeError("Analyse finished without a Gold completion report.")
@@ -165,6 +185,7 @@ def main():
         return 0
     if report_path is None:
         raise RuntimeError("Notebook finished without an acquisition run report.")
+    # Prepare must produce both Silver receipts and no Gold receipt.
     if args.mode == "prepare":
         source_path = completion_paths.get("source_silver_completion.json")
         hourly_path = completion_paths.get("hourly_silver_completion.json")
@@ -185,6 +206,7 @@ def main():
         print("Hourly Silver receipt:", hourly_path)
         print("Prepare finished successfully.")
         return 0
+    # Full must finish every layer and link Gold to this execution's hourly Silver release.
     missing_reports = completion_names - completion_paths.keys()
     if missing_reports:
         raise RuntimeError(
