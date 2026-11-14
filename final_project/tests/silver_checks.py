@@ -1,4 +1,8 @@
-"""Synthetic checks for source and hourly Silver. Called from the VM notebook."""
+"""Synthetic Silver checks called by the notebook.
+
+Each fixture starts with valid input, changes selected fields, and compares the
+result with explicit expectations. The large case lists are test data, not extra
+pipeline steps. Publication checks use temporary copies of the staged files."""
 
 import hashlib
 import json
@@ -6,11 +10,10 @@ import time
 from collections import Counter
 from pathlib import Path
 
-import pyspark
 from pyspark.sql import functions as F, types as T
 
 
-def verify_delimited_readers(*, spark, staging_root, read_validated_ozone_csv, read_validated_delimited_file):
+def verify_delimited_readers(*, staging_root, read_validated_ozone_csv, read_validated_delimited_file):
     'Verify CSV and PSV readers using small files in the supplied staging root.'
     staging_root = Path(staging_root)
 
@@ -22,6 +25,7 @@ def verify_delimited_readers(*, spark, staging_root, read_validated_ozone_csv, r
 
     reader_fixture_header = "state_code,ozone_raw,note\n"
 
+    # Small files exercise quoting and malformed rows before any Silver field rules run.
     reader_fixture_cases = {
         "valid": "01,0.040,plain\n",
         "empty_final_value": "01,0.040,\n",
@@ -74,6 +78,7 @@ def verify_delimited_readers(*, spark, staging_root, read_validated_ozone_csv, r
         print(f"{case_name}: accepted; decoded values verified")
 
 
+    # These files must be rejected, rather than silently dropping or shifting columns.
     validated_reader_failures = {
         "too_few_fields": "expected 3 fields, found 2",
         "too_many_fields": "expected 3 fields, found 4",
@@ -100,6 +105,8 @@ def verify_delimited_readers(*, spark, staging_root, read_validated_ozone_csv, r
         f"{len(validated_reader_notes) + len(validated_reader_failures)} cases."
     )
 
+    # Use a pipe-delimited temperature fixture to test a different separator,
+    # including a quoted value that contains a pipe.
     temperature_reader_fixture_dir = (
         staging_root / f"temperature-reader-{time.time_ns()}"
     )
@@ -204,6 +211,7 @@ def verify_delimited_readers(*, spark, staging_root, read_validated_ozone_csv, r
 
 def verify_ozone_rules(*, spark, type_ozone_fields, ozone_field_checks, classify_ozone_fields, resolve_source_keys, ozone_key_columns, build_ozone_observations, build_ozone_audit):
     'Verify ozone field rules, key resolution, observation outputs and audit accounting.'
+    # Start from a valid ozone report; each case below changes only the fields it needs.
     ozone_fixture_base = {
         "State Code": "01",
         "County Code": "073",
@@ -310,6 +318,7 @@ def verify_ozone_rules(*, spark, type_ozone_fields, ozone_field_checks, classify
 
     print(f"Ozone field fixtures passed: {len(expected)}")
 
+    # Now test duplicate and conflicting keys separately from individual field validity.
     key_fixture_base = {
         **ozone_fixture_base,
         "County Name": "Jefferson",
@@ -458,6 +467,7 @@ def verify_ozone_rules(*, spark, type_ozone_fields, ozone_field_checks, classify
 
     print(f"Ozone key fixtures passed: {len(key_fixture_cases)}")
 
+    # The audit must account for every source occurrence, including copies and rejected rows.
     audit_fixture_resolved = resolve_source_keys(
         key_fixture_classified,
         key_columns=ozone_key_columns,
@@ -585,6 +595,7 @@ def verify_ozone_rules(*, spark, type_ozone_fields, ozone_field_checks, classify
         f"account for {sum(actual_occurrences.values())} source records."
     )
 
+    # Check the final observation values and source details, not just whether a row passed.
     observation_fixture_base = {
         **key_fixture_base,
         "Date GMT": "2025-06-01",
@@ -1027,7 +1038,7 @@ def verify_temperature_rules(*, spark, profile, temperature_columns, type_temper
         temperature_fixture_expected[case_id] = expected_reasons
 
     # Explicit string types allow fixtures containing null source values.
-    temperature_fixture_schema = pyspark.sql.types.StructType()
+    temperature_fixture_schema = T.StructType()
     temperature_fixture_schema.add("fixture_id", "string", nullable=False)
 
     for field_name in temperature_fixture_defaults:
@@ -1129,6 +1140,8 @@ def verify_temperature_rules(*, spark, profile, temperature_columns, type_temper
         f"{len(temperature_field_cases)} cases."
     )
 
+    # Test reports sharing a station and timestamp: exact copies, conflicting
+    # readings, and matching temperature evidence from different report types.
     temperature_key_base = dict(temperature_fixture_defaults)
 
     temperature_key_source = {
@@ -1447,6 +1460,7 @@ def verify_temperature_rules(*, spark, profile, temperature_columns, type_temper
         f"{len(temperature_key_rows)} source records."
     )
 
+    # Add output-specific cases to check cleaned values and the source information kept with them.
     temperature_output_extra_cases = [
         ("output_negative", 0, {"temperature": "-10.0"}),
         ("output_lower_boundary", 1, {"temperature": "-100.0"}),
@@ -1746,6 +1760,7 @@ def verify_temperature_rules(*, spark, profile, temperature_columns, type_temper
         f"{len(temperature_output_results)} output records."
     )
 
+    # Check that the temperature audit accounts for all input records and preserves rejection reasons.
     temperature_audit_fixture = build_temperature_audit(
         temperature_output_resolved,
         source_columns=list(temperature_key_base),
@@ -1912,6 +1927,7 @@ def verify_temperature_rules(*, spark, profile, temperature_columns, type_temper
 
 
 def _reference_fixture_inputs():
+    """Return valid raw reference records to use as the starting point for each test case."""
     epa = {
         "State Code": "01", "County Code": "073", "Site Number": "1005",
         "Latitude": "30.0", "Longitude": "-90.0", "Datum": "WGS84",
@@ -1938,6 +1954,7 @@ def _reference_fixture_inputs():
 
 
 def _reference_fixture_frame(spark, rows):
+    """Build a string-valued Spark table, like the raw reference input before conversion."""
     columns = sorted(rows[0])
     schema = T.StructType([
         T.StructField(column, T.StringType(), True) for column in columns
@@ -2070,6 +2087,7 @@ def verify_reference_outputs(
     resolve_reference_keys, build_reference_outputs,
 ):
     """Check reference keys, cleaned values, lineage and counted audits."""
+    # Each reference has a different identifier, but follows the same duplicate and audit rules.
     key_specs = {
         "epa_sites": (
             "site_id", "01-073-1005",
@@ -2178,6 +2196,7 @@ def verify_reference_outputs(
                 expected_occurrences[identity] += 1
                 rows.append({**raw, **lineage, "_reverse_flags": str(index % 2)})
 
+        # Run the fixture through the same conversion and classification functions as the notebook.
         raw_frame = _reference_fixture_frame(spark, rows)
         classified = classify_reference_fields(
             type_reference_fields(raw_frame, name), name,
@@ -2195,6 +2214,7 @@ def verify_reference_outputs(
         clean_rows = result["reference"].collect()
         audit_rows = result["audit"].collect()
 
+        # First check the audit: each input occurrence must be counted under the right reason.
         actual_dispositions = {path: Counter() for path in labels}
         audited_occurrences, output_counts = Counter(), Counter()
         for row in audit_rows:
@@ -2238,6 +2258,7 @@ def verify_reference_outputs(
         assert actual_dispositions == expected_dispositions, (name, actual_dispositions)
         assert audited_occurrences == expected_occurrences, (name, "source accounting")
 
+        # Then check the usable reference rows, including values, warnings and original source details.
         for row in clean_rows:
             path = row["source_file_path"]
             label = labels[path]
@@ -2303,10 +2324,12 @@ def verify_silver_publication(
     results = []
 
     def passed(name):
+        """Record and print one successfully checked publication case."""
         results.append(name)
         print(f"{name}: passed")
 
     def rejected(name, exception_type, message, action):
+        """Require the expected error type and message, so an unrelated failure cannot pass."""
         try:
             action()
         except exception_type as error:
@@ -2330,6 +2353,7 @@ def verify_silver_publication(
         )
 
         def new_case(name):
+            """Copy the validated bundle into a separate temporary folder for this test case."""
             candidate = deepcopy(stage)
             candidate.update({
                 "environment": fixture_context.environment,
@@ -2350,6 +2374,7 @@ def verify_silver_publication(
             return candidate, report
 
         def publish(candidate, report):
+            """Call the real source publisher with the isolated fixture context."""
             return publish_source_silver(
                 candidate, report, contracts, fixture_context,
                 profile=profile,
@@ -2358,6 +2383,7 @@ def verify_silver_publication(
             )
 
         def locations(candidate):
+            """Find the data and manifest paths that this fixture would publish."""
             region = profile["region"].strip().lower().replace(" ", "_")
             suffix = (
                 f"silver/source/{region}/{profile['year']}/"
@@ -2368,6 +2394,7 @@ def verify_silver_publication(
                 root / f"published/{suffix}/manifest.json",
             )
 
+        # Establish a valid release before testing retries and deliberately broken attempts.
         first_stage, first_report = new_case("successful")
         first = publish(first_stage, first_report)
         first_manifest = Path(first["manifest_path"])
@@ -2380,11 +2407,13 @@ def verify_silver_publication(
         verify_silver_file_inventory(first_bundle, first_stage["datasets"])
         passed("successful_publication")
 
+        # Repeating the same publication should reuse the release without changing its manifest.
         repeated = publish(first_stage, first_report)
         assert repeated["outcome"] == "reused"
         assert first_manifest.read_bytes() == first_manifest_bytes
         passed("identical_attempt_reused")
 
+        # Each case breaks one thing in its own copy, so failures cannot affect real published data.
         failure_cases = [
             ("failed_validation", ValueError, "matching stage"),
             ("changed_receipt", ValueError, "matching stage"),
@@ -2475,17 +2504,16 @@ def verify_hourly_integration(
     select_hourly_temperature, enrich_hourly_ozone, prepare_hourly_silver,
 ):
     """Check hourly integration with synthetic records and leap-year coverage."""
-    import json
-    from pyspark.sql import functions as F
-
     passed = []
 
     def check(label, condition):
+        """Stop on a failed expectation; otherwise record the completed hourly check."""
         if not condition:
             raise AssertionError(label)
         passed.append(label)
 
     def rejects(label, action, message):
+        """Check that an invalid hourly input raises the expected validation message."""
         try:
             action()
         except ValueError as error:
@@ -2493,6 +2521,7 @@ def verify_hourly_integration(
         else:
             raise AssertionError(f"{label}: expected ValueError")
 
+    # Use a leap year to check the full calendar, including February and the final hour.
     fixture_profile = json.loads(json.dumps(profile))
     fixture_profile.update(region="Fixture", year=2024)
     monitor_id = "-".join(fixture_profile["ozone_monitor"][key] for key in (
@@ -2501,6 +2530,7 @@ def verify_hourly_integration(
     station_id = fixture_profile["weather_mapping"]["noaa_station_id"]
 
     def timed(rows, schema):
+        """Convert the fixture timestamp strings into Spark timestamps for hourly processing."""
         return spark.createDataFrame(rows, schema).withColumn(
             "timestamp_utc", F.to_timestamp("timestamp_utc")
         )
@@ -2521,6 +2551,8 @@ def verify_hourly_integration(
     ], "station_id STRING, timestamp_utc STRING, temperature_c DOUBLE, "
        "source_record_sha256 STRING, report_type STRING, quality_flags ARRAY<STRING>")
 
+    # The audit includes extra copies, excluded hours and an unassignable timestamp.
+    # These counts must stay distinct from the number of usable hourly readings.
     ozone_audit = ozone.select("monitor_id", "timestamp_utc").withColumn(
         "record_count", F.lit(1).cast("long")
     ).unionByName(timed([
@@ -2573,6 +2605,7 @@ def verify_hourly_integration(
     outputs, checks = bundle["tables"], bundle["checks"]
 
     def keyed(table):
+        """Index the small fixture output by hour so individual results are easy to check."""
         return {
             row["hour"]: row.asDict()
             for row in table.withColumn(
@@ -2661,6 +2694,7 @@ def verify_hourly_integration(
           and empty_enriched.filter(F.col("temperature_c").isNotNull()).count() == 0)
 
     def select(table):
+        """Apply the real hourly temperature selection policy to a fixture table."""
         return select_hourly_temperature(
             table, policy_version="temperature-hourly-v1"
         )
@@ -2671,6 +2705,7 @@ def verify_hourly_integration(
     check("Stations partition independently",
           select(reports.unionByName(extra_station)).count() == 4)
 
+    # Try invalid scope, keys and timestamps to confirm the hourly preparation rejects them.
     negative_cases = [
         ("Repeated report timestamps",
          lambda: select(reports.unionByName(reports.limit(1))),

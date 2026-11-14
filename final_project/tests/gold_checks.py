@@ -24,6 +24,7 @@ from silver_files import file_sha256
 
 
 def check_detector(spark):
+    """Check threshold equality, missing hours and separate monitors using small made-up readings."""
     schema = "monitor_id string, hour string, ozone_ppm double, temperature_c double"
     rows = [
         ("A", "2025-04-30 22:00", 0.040, 11.0),
@@ -40,6 +41,7 @@ def check_detector(spark):
         .withColumn("region", F.lit("fixture"))
         .withColumn("year", F.lit(2025))
     )
+    # This threshold is only for the fixture; it does not change the saved Gold rule.
     rules = {"threshold_ppm": 0.050, "comparison": ">=", "minimum_hours": 3}
 
     elevated = elevated_runs(ozone, rules)
@@ -65,6 +67,7 @@ def check_detector(spark):
     strict = elevated_runs(ozone, {**rules, "comparison": ">"})
     assert strict.where("run_hours >= 3").count() == 0
 
+    # The missing 02:00 hour splits the run, even though both sides have high readings.
     extra = elevated.where("run_hours = 2").select("monitor_id", "hour").collect()
     assert {tuple(row) for row in extra} == {
         ("A", "2025-05-01 03:00"), ("A", "2025-05-01 04:00")
@@ -73,6 +76,7 @@ def check_detector(spark):
     print("PASS: Gold detector fixture")
 
 def check_catalogue(spark):
+    """Check period summaries, missing weather and the reasons recorded at each boundary."""
     from math import isclose
 
     # Each row describes one calendar hour. A null start means it is
@@ -124,6 +128,7 @@ def check_catalogue(spark):
     assert len(result) == 3
     a, b, c = result
 
+    # The end is exclusive: the final member is 01:00, so the period ends at 02:00.
     assert a.duration_hours == 3
     assert a.period_end_utc - a.period_start_utc == timedelta(hours=3)
     assert isclose(a.peak_ozone_ppm, 0.070) and isclose(a.mean_ozone_ppm, 0.060)
@@ -137,11 +142,13 @@ def check_catalogue(spark):
     assert b.temperature_summary_reason == "no_eligible_temperature"
     assert (c.start_boundary, c.end_boundary) == ("excluded", "year_boundary")
 
+    # A year with no qualifying periods must still return the same table structure.
     empty = build_period_catalogue(members.limit(0), ozone, calendar, rules)
     assert empty.schema == catalogue.schema and empty.count() == 0
     print("PASS: Gold catalogue fixture")
 
 def check_monthly_coverage(spark):
+    """Check month allocation and distinguish missing data from a year with no qualifying periods."""
     from calendar import monthrange
     from datetime import date
 
@@ -229,6 +236,7 @@ def check_release(spark, context):
     options = dict(parent=parent, parent_path=relative, parent_sha256=digest, context=context,
                    rules=load_gold_rules(PROJECT / "config/gold_rules.json"))
     catalogue = spark.createDataFrame([(3, None)], "duration_hours long, note string")
+    # Publish both a populated and an empty catalogue, then compare every reloaded value.
     for count in (1, 0):
         periods = catalogue.limit(count)
         monthly = spark.createDataFrame([(3 * count, 3 * count, count)],
@@ -249,11 +257,14 @@ def check_release(spark, context):
         raise AssertionError("Gold accepted a wrong manifest digest.")
 
     def fail_second(table, bundle, name):
+        """Simulate a failed monthly write after the catalogue has already been staged."""
         if name == "monthly_coverage":
             assert (bundle / "period_catalogue").is_dir()
             raise OSError("fixture: interrupted second write")
         return stage_gold_table(table, bundle, name)
 
+    # Interrupt the second table write. There must be no new publication manifest,
+    # and the last successful release must still load.
     before = set(context.published_root.rglob("manifest.json"))
     with patch("gold_io.stage_gold_table", side_effect=fail_second):
         try:
@@ -268,6 +279,7 @@ def check_release(spark, context):
 
 
 if __name__ == "__main__":
+    # Keep fixture files separate from dev and prod; remove them when the test finishes.
     with TemporaryDirectory(prefix="dat535-gold-test-") as scratch:
         context = RunContext("test", Path(scratch), "gold-fixture")
         spark = (SparkSession.builder.master("local[2]").appName("DAT535 Gold checks")

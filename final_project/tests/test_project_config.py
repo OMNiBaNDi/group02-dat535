@@ -13,7 +13,9 @@ from project_config import load_environment_roots
 
 
 class EnvironmentConfigTests(unittest.TestCase):
+    """Check storage settings using temporary paths rather than the VM data folders."""
     def setUp(self):
+        """Prepare three separate root paths and remove the temporary folder after each test."""
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.base = Path(temporary.name).resolve()
@@ -25,9 +27,11 @@ class EnvironmentConfigTests(unittest.TestCase):
         }
 
     def write_config(self, settings):
+        """Write the settings for the current test to a temporary JSON file."""
         self.config_path.write_text(json.dumps(settings), encoding="utf-8")
 
     def test_valid_roots_without_creating_directories(self):
+        """Valid settings should return paths without creating data directories."""
         self.write_config(self.valid)
 
         roots = load_environment_roots(self.config_path)
@@ -44,6 +48,7 @@ class EnvironmentConfigTests(unittest.TestCase):
             self.assertFalse(root.exists())
 
     def test_invalid_configurations_are_rejected(self):
+        """Reject missing settings, overlapping storage and paths inside the checkout."""
         cases = {
             "missing environment": {
                 "dev": self.valid["dev"],
@@ -78,6 +83,7 @@ class EnvironmentConfigTests(unittest.TestCase):
                     load_environment_roots(self.config_path)
 
     def test_symbolic_link_cannot_hide_overlapping_roots(self):
+        """Two names for the same physical folder must still count as overlapping storage."""
         dev_root = self.base / "dev"
         dev_root.mkdir()
         alias = self.base / "test-alias"
@@ -88,6 +94,7 @@ class EnvironmentConfigTests(unittest.TestCase):
             load_environment_roots(self.config_path)
 
     def test_malformed_json_is_rejected(self):
+        """Invalid JSON should fail instead of being treated as usable settings."""
         self.config_path.write_text("{ invalid json", encoding="utf-8")
 
         with self.assertRaises(json.JSONDecodeError):

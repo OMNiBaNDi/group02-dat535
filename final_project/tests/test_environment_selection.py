@@ -13,7 +13,9 @@ from project_config import select_environment_root
 
 
 class EnvironmentSelectionTests(unittest.TestCase):
+    """Check that each environment and test invocation selects its own storage."""
     def setUp(self):
+        """Create a temporary configuration so these tests never use real project data."""
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.base = Path(temporary.name).resolve()
@@ -28,6 +30,7 @@ class EnvironmentSelectionTests(unittest.TestCase):
         )
 
     def test_dev_and_prod_use_configured_roots(self):
+        """Selecting a root should return its configured path without creating it."""
         for environment in ("dev", "prod"):
             with self.subTest(environment=environment):
                 selected = select_environment_root(
@@ -37,6 +40,7 @@ class EnvironmentSelectionTests(unittest.TestCase):
                 self.assertFalse(selected.exists())
 
     def test_test_invocations_have_separate_roots(self):
+        """Different test IDs must lead to different folders under the test root."""
         selected_roots = []
         for identifier in ("invocation-001", "invocation-002"):
             selected = select_environment_root(
@@ -49,6 +53,7 @@ class EnvironmentSelectionTests(unittest.TestCase):
         self.assertNotEqual(selected_roots[0], selected_roots[1])
 
     def test_invalid_selections_are_rejected(self):
+        """Reject unknown environments and test IDs that are not simple folder names."""
         cases = {
             "unknown environment": ("production", None),
             "missing test ID": ("test", None),
@@ -73,6 +78,7 @@ class EnvironmentSelectionTests(unittest.TestCase):
                     )
 
     def test_links_cannot_redirect_test_invocations(self):
+        """A symbolic link must not send one test into another test or production folder."""
         self.roots["test"].mkdir()
         targets = (
             self.roots["prod"],

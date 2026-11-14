@@ -5,6 +5,7 @@ from pathlib import Path
 
 
 def load_environment_roots(config_path: Path) -> dict[str, Path]:
+    """Return validated dev/test/prod storage paths without creating any directories."""
     settings = json.loads(config_path.read_text(encoding="utf-8"))
 
     if not isinstance(settings, dict) or set(settings) != {"dev", "test", "prod"}:
@@ -14,6 +15,7 @@ def load_environment_roots(config_path: Path) -> dict[str, Path]:
     repository_root = Path(__file__).resolve().parents[2]
     roots = {}
 
+    # Keep persistent data outside the repository and disposable Actions runner checkouts.
     for environment, value in settings.items():
         if not isinstance(value, str) or not value.strip():
             raise ValueError(f"{environment}: storage root must be a non-empty string.")
@@ -33,6 +35,7 @@ def load_environment_roots(config_path: Path) -> dict[str, Path]:
 
         roots[environment] = root
 
+    # Environment folders must be separate: neither identical nor nested inside each other.
     for environment, root in roots.items():
         for other_environment, other_root in roots.items():
             if environment != other_environment and root.is_relative_to(other_root):
@@ -57,6 +60,7 @@ def select_environment_root(
 
     root = roots[environment]
 
+    # Development and production use their configured roots directly; tests get a subfolder.
     if environment != "test":
         if test_run_id is not None:
             raise ValueError("test_run_id is only valid for the test environment.")
@@ -65,6 +69,7 @@ def select_environment_root(
     if not isinstance(test_run_id, str) or not test_run_id:
         raise ValueError("The test environment requires a non-empty test_run_id.")
 
+    # Treat the test ID as one directory name, not a path supplied by the caller.
     allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
     if len(test_run_id) > 80 or any(char not in allowed for char in test_run_id):
         raise ValueError(

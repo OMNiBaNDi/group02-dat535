@@ -7,6 +7,7 @@ import sys
 
 
 def configure_vm_python():
+    """Require the VM spark-env interpreter and select the installed Spark 3.5.0 Python libraries."""
     if (
         sys.version_info[:2] != (3, 11)
         or Path(sys.prefix) != Path("/home/ubuntu/spark-env")
@@ -39,6 +40,7 @@ def configure_vm_python():
 
 
 def start_silver_session(project_dir, context):
+    """Start the configured UTC Spark session, verify it can run a job and return it."""
     from pyspark.sql import SparkSession
     import pyspark
 
@@ -49,6 +51,7 @@ def start_silver_session(project_dir, context):
         "pyspark-shell",
     ])
 
+    # Use a warehouse inside this run's staging directory instead of writing into the repository.
     spark = (
         SparkSession.builder
         .appName(f"DAT535-Silver-{context.environment}")
@@ -72,6 +75,7 @@ def start_silver_session(project_dir, context):
         if total != 10:
             raise RuntimeError(f"Startup check expected 10, received {total}.")
 
+    # Close a session that failed startup validation before passing the error to the caller.
     except Exception:
         spark.stop()
         raise

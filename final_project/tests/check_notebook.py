@@ -14,6 +14,7 @@ from source_columns import check_columns, required_columns
 
 
 def check_schema():
+    """Check that a complete header passes and a missing required column blocks the source."""
     source = {"source": "epa", "dataset": "sites"}
     columns = required_columns[("epa", "sites")]
     valid = check_columns(source, columns)
@@ -25,6 +26,7 @@ def check_schema():
 
 
 def main():
+    """Check syntax and configuration without running Spark, then save a report for the PR."""
     parser = argparse.ArgumentParser(description="Check notebook syntax, input columns and configuration offline.")
     parser.add_argument("--test-run-id", required=True)
     parser.add_argument("--environments-file", type=Path,
@@ -53,6 +55,7 @@ def main():
 
         notebook_path = PROJECT_DIR / "notebooks/pipeline.ipynb"
         report["notebook_sha256"] = hashlib.sha256(notebook_path.read_bytes()).hexdigest()
+        # Compile checks Python syntax only. It does not download data or execute these cells.
         for cell in json.loads(notebook_path.read_text(encoding="utf-8"))["cells"]:
             if cell["cell_type"] == "code":
                 compile("".join(cell["source"]), str(notebook_path), "exec")

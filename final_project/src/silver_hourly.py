@@ -1,4 +1,8 @@
-"""Prepare a region-year from verified source Silver using UTC clock hours."""
+"""Prepare hourly Silver from the cleaned source tables.
+
+Pair the configured ozone monitor and weather station, select one weather report
+per hour, and join it to ozone. Build a full-year calendar to show both available
+and missing data. Return six tables and their checks; the notebook publishes them."""
 
 import calendar
 from datetime import datetime
@@ -11,7 +15,7 @@ from silver_files import silver_json_sha256
 
 
 def inspect_hourly_inputs(tables, profile):
-    """Check integration keys and summarize their UTC clock-hour distribution."""
+    """Check selected monitor/station IDs, timestamps and duplicate keys before joining."""
     year = profile["year"]
     monitor = profile["ozone_monitor"]
     monitor_id = "-".join(
@@ -23,6 +27,7 @@ def inspect_hourly_inputs(tables, profile):
     )
     station_id = profile["weather_mapping"]["noaa_station_id"]
 
+    # Include January 1 and exclude January 1 of the next year.
     start = F.to_timestamp(F.lit(f"{year}-01-01 00:00:00"))
     end = F.to_timestamp(F.lit(f"{year + 1}-01-01 00:00:00"))
     inputs = {}
@@ -43,6 +48,7 @@ def inspect_hourly_inputs(tables, profile):
             )
         )
 
+        # Count reports separately from clock hours: several weather reports can share an hour.
         result = table.agg(
             F.count("*").alias("records"),
             F.countDistinct(
@@ -65,6 +71,8 @@ def inspect_hourly_inputs(tables, profile):
             ).alias("latest_utc"),
         ).first().asDict()
 
+        # Reject wrong identities, out-of-year records and repeated keys.
+        # Ozone must be on the hour; weather reports may be at times such as 14:53.
         if (
             result["invalid_scope_records"]
             or result["records"] != result["distinct_keys"]
@@ -102,6 +110,7 @@ def build_yearly_mapping(tables, profile, source_publication_id):
             "The mapping and ozone monitor identify different EPA sites."
         )
 
+    # Read just the selected reference rows. More than one match makes the pairing ambiguous.
     references = {}
     for name, id_column, expected_id in (
         ("epa_sites", "site_id", site_id),
@@ -131,6 +140,7 @@ def build_yearly_mapping(tables, profile, source_publication_id):
             "Reference identifier components disagree with the profile."
         )
 
+    # Require usable coordinates before describing the pairing.
     for name, record in references.items():
         lat, lon = record["latitude_deg"], record["longitude_deg"]
         if (
@@ -141,6 +151,8 @@ def build_yearly_mapping(tables, profile, source_publication_id):
         ):
             raise ValueError(f"{name}: coordinates are unusable.")
 
+    # Preserve reference warnings for review. Finding the requested monitor and
+    # station does not by itself mean their pairing has been accepted.
     review_flags = [
         f"{name}:{flag}"
         for name, record in references.items()
@@ -183,6 +195,7 @@ def build_yearly_mapping(tables, profile, source_publication_id):
     else:
         review_flags.append("distance_requires_epa_datum_review")
 
+    # Compare reference dates with the analysis year and flag metadata needing review.
     first_day = datetime(year, 1, 1).date()
     last_day = datetime(year, 12, 31).date()
 
@@ -217,6 +230,8 @@ def build_yearly_mapping(tables, profile, source_publication_id):
 
     review_flags = sorted(set(review_flags))
 
+    # Tie the mapping ID to both the profile and source publication. A new source parent
+    # can change this ID even when the physical station pairing stays the same.
     identity = {
         "mapping_version": "fixed-site-station-year-v1",
         "region": profile["region"],
@@ -231,6 +246,7 @@ def build_yearly_mapping(tables, profile, source_publication_id):
     }
     mapping_id = silver_json_sha256(identity)
 
+    # Create one mapping row for the configured year, with an exclusive end time.
     mapping = spark.createDataFrame(
         [(
             mapping_id,
@@ -258,6 +274,8 @@ def build_yearly_mapping(tables, profile, source_publication_id):
         "valid_until_utc", F.to_timestamp("valid_until_utc"),
     )
 
+    # Return reference details and limitations with approval still pending.
+    # The notebook records the separate reviewed acceptance decision.
     evidence = {
         **identity,
         "mapping_id": mapping_id,
@@ -287,6 +305,7 @@ def select_hourly_temperature(reports, *, policy_version):
     if policy_version != "temperature-hourly-v1":
         raise ValueError("Unsupported hourly temperature policy.")
 
+    # Reject inputs that already contain our derived hourly columns.
     reserved = {
         "hour_start_utc",
         "report_timestamp_utc",
@@ -308,6 +327,7 @@ def select_hourly_temperature(reports, *, policy_version):
             "Hourly selection requires usable station and timestamp keys."
         )
 
+    # Repeated station/report timestamps would make the latest-report choice ambiguous.
     if reports.groupBy(
         "station_id", "timestamp_utc"
     ).count().filter(
@@ -317,10 +337,13 @@ def select_hourly_temperature(reports, *, policy_version):
             "Repeated report timestamps could create ambiguous hourly selection."
         )
 
+    # Compare reports only within the same station and UTC hour.
     hour_window = Window.partitionBy(
         "station_id", "hour_start_utc"
     )
 
+    # Keep original timestamps, count each hour's reports and find the latest one.
+    # For example, 14:53 represents 14:00-15:00, while 15:00 belongs to the next hour.
     candidates = (
         reports
         .withColumnRenamed(
@@ -347,6 +370,7 @@ def select_hourly_temperature(reports, *, policy_version):
         }
     ]
 
+    # Keep the latest report, its source details and the number of candidates.
     return (
         candidates
         .filter(
@@ -370,6 +394,7 @@ def select_hourly_temperature(reports, *, policy_version):
 
 
 def usable_hourly_key(keys):
+    """Return a Spark condition requiring every key field to be present and nonblank."""
     usable = F.lit(True)
     for name in keys:
         usable = usable & F.col(name).isNotNull() & (
@@ -381,6 +406,7 @@ def usable_hourly_key(keys):
 def check_hourly_keys(table, keys, label):
     """Require non-empty, unique keys and return the row count."""
     usable = usable_hourly_key(keys)
+    # Check that all key fields are usable and their combined values identify unique rows.
     counts = table.agg(
         F.count("*").alias("records"),
         F.countDistinct(*keys).alias("distinct_keys"),
@@ -397,6 +423,7 @@ def enrich_hourly_ozone(ozone, weather, mapping):
     if ozone.sparkSession.conf.get("spark.sql.session.timeZone") != "UTC":
         raise ValueError("Hourly enrichment requires UTC.")
 
+    # Check keys before joining so repeated matches cannot multiply ozone rows.
     input_records = check_hourly_keys(
         ozone, ["monitor_id", "timestamp_utc"], "Ozone"
     )
@@ -406,6 +433,8 @@ def enrich_hourly_ozone(ozone, weather, mapping):
     if mapping.count() != 1:
         raise ValueError("A region-year requires exactly one fixed mapping.")
 
+    # Send the small mapping table to each Spark worker (broadcast), then use it
+    # to attach the chosen weather station to the ozone readings.
     mapped = (
         ozone.withColumnRenamed("timestamp_utc", "hour_start_utc")
         .join(
@@ -416,6 +445,7 @@ def enrich_hourly_ozone(ozone, weather, mapping):
             how="left",
         )
     )
+    # Require every ozone hour to fall inside the mapping's start-inclusive, end-exclusive year.
     valid_mapping = (
         F.col("mapping_id").isNotNull()
         & F.col("weather_station_id").isNotNull()
@@ -427,7 +457,8 @@ def enrich_hourly_ozone(ozone, weather, mapping):
     if mapped.filter(~F.coalesce(valid_mapping, F.lit(False))).limit(1).count():
         raise ValueError("An ozone hour has no usable mapping or is off-hour.")
 
-    # Keep weather lineage separate from ozone lineage.
+    # Keep weather source details under separate column names, so we can trace
+    # both readings back to their original files after the join.
     weather_names = {
         name: (
             "weather_station_id" if name == "station_id"
@@ -439,6 +470,7 @@ def enrich_hourly_ozone(ozone, weather, mapping):
     weather_columns = weather.select(
         *[F.col(name).alias(target) for name, target in weather_names.items()]
     )
+    # Keep every ozone hour with a left join. Missing weather becomes null and gets a flag.
     enriched = (
         mapped.join(
             weather_columns,
@@ -458,6 +490,7 @@ def enrich_hourly_ozone(ozone, weather, mapping):
         )
     )
 
+    # Require the same number of unique ozone hours before and after the joins.
     checks = enriched.agg(
         F.count("*").alias("enriched_records"),
         F.countDistinct("monitor_id", "hour_start_utc").alias("distinct_hour_keys"),
@@ -490,6 +523,7 @@ def build_calendar_coverage(tables, enriched, weather, profile):
     start = F.to_timestamp(F.lit(f"{year}-01-01 00:00:00"))
     end = F.to_timestamp(F.lit(f"{year + 1}-01-01 00:00:00"))
 
+    # Generate every UTC hour of the year, including hours with no source readings.
     calendar_hours = session.range(1).select(
         F.explode(F.sequence(
             start, end - F.expr("INTERVAL 1 HOUR"), F.expr("INTERVAL 1 HOUR")
@@ -503,6 +537,8 @@ def build_calendar_coverage(tables, enriched, weather, profile):
     )
 
     def audit_by_hour(audit, id_column, expected_id, prefix):
+        """Return source-record counts per assignable hour and totals that could not be assigned."""
+        # Assign only records for this identifier and year. Ozone must also be exactly on the hour.
         assignable = (
             (F.col(id_column) == expected_id)
             & (F.col("timestamp_utc") >= start)
@@ -514,6 +550,7 @@ def build_calendar_coverage(tables, enriched, weather, profile):
             )
         assignable = F.coalesce(assignable, F.lit(False))
 
+        # Count all source copies, including records whose identifier or time prevents assignment.
         assignment = audit.agg(
             F.coalesce(F.sum("record_count"), F.lit(0)).alias("source_records"),
             F.coalesce(F.sum(F.when(
@@ -524,6 +561,7 @@ def build_calendar_coverage(tables, enriched, weather, profile):
         aggregates = [
             F.sum("record_count").alias(f"{prefix}_source_records")
         ]
+        # A numeric temperature can still fail quality rules. Count it separately from eligible weather.
         if prefix == "temperature":
             numeric = F.lit(True)
             for flag in (
@@ -552,6 +590,8 @@ def build_calendar_coverage(tables, enriched, weather, profile):
         tables["temperature_audit"], "station_id", station_id, "temperature"
     )
 
+    # Join source counts and eligible results onto the full calendar.
+    # Zero counts mean no matching records, not a measured ozone or temperature value.
     coverage = (
         calendar_hours
         .join(ozone_hours, ["monitor_id", "hour_start_utc"], "left")
@@ -588,6 +628,7 @@ def build_calendar_coverage(tables, enriched, weather, profile):
         .withColumn("expected_ozone_operating", F.lit(None).cast("boolean"))
         .withColumn("expected_temperature_operating", F.lit(None).cast("boolean"))
     )
+    # Distinguish usable data, source records that were excluded and no assignable source record.
     for source in ("ozone", "temperature"):
         coverage = coverage.withColumn(
             f"{source}_status",
@@ -608,6 +649,7 @@ def summarise_hourly_coverage(coverage):
         raise ValueError("Coverage summaries require UTC.")
 
     keys = ["region", "year", "monitor_id", "station_id"]
+    # Build monthly counts from the complete calendar, retaining months with no observations.
     conditions = {
         "observed_ozone_hours": F.col("ozone_source_records") > 0,
         "eligible_ozone_hours": F.col("ozone_available"),
@@ -621,6 +663,7 @@ def summarise_hourly_coverage(coverage):
             F.col("ozone_available") & ~F.col("temperature_available")
         ),
     }
+    # An operating-hours total is known only when every hour has a documented operating status.
     operating_counts = [
         F.when(
             F.count(f"expected_{source}_operating") == F.count("*"),
@@ -638,6 +681,8 @@ def summarise_hourly_coverage(coverage):
             *operating_counts,
         )
     )
+    # Calendar coverage uses all hours; weather-match coverage uses eligible ozone hours.
+    # Leave a percentage null when its denominator is zero.
     percentages = {
         "ozone_calendar_pct": ("eligible_ozone_hours", "calendar_hours"),
         "temperature_calendar_pct": ("eligible_temperature_hours", "calendar_hours"),
@@ -666,6 +711,7 @@ def summarise_hourly_coverage(coverage):
         )
     )
 
+    # An hour can belong to several gap categories; summarise each category independently.
     gap_conditions = {
         "no_eligible_ozone": ~F.col("ozone_available"),
         "no_eligible_temperature": ~F.col("temperature_available"),
@@ -673,6 +719,7 @@ def summarise_hourly_coverage(coverage):
             F.col("ozone_available") & ~F.col("temperature_available")
         ),
     }
+    # Create one row per applicable gap category and hour.
     missing_hours = coverage.select(
         *keys, "hour_start_utc",
         F.explode(F.filter(
@@ -685,7 +732,9 @@ def summarise_hourly_coverage(coverage):
     )
     gap_order = Window.partitionBy(*keys, "gap_kind").orderBy("hour_start_utc")
 
-    # Consecutive hours share the same timestamp-minus-position value.
+    # Subtract row position * 3600 from each timestamp in seconds. Consecutive
+    # missing hours get the same value, so they form one gap. Its end is one
+    # hour after the final missing hour; that end timestamp is not part of the gap.
     gaps = (
         missing_hours.withColumn(
             "__gap_group",
@@ -704,7 +753,7 @@ def summarise_hourly_coverage(coverage):
 
 
 def prepare_hourly_silver(tables, manifest, *, environment):
-    """Prepare hourly Silver from a verified source Silver publication."""
+    """Return six prepared DataFrames, mapping evidence and consistency checks for one source release."""
     if (
         manifest["kind"] != "source_silver"
         or manifest["status"] != "published"
@@ -715,6 +764,7 @@ def prepare_hourly_silver(tables, manifest, *, environment):
     if tables["ozone_observations"].sparkSession.conf.get("spark.sql.session.timeZone") != "UTC":
         raise ValueError("Hourly preparation requires UTC.")
 
+    # Use a copy of the published profile and require the supported hourly-selection policy.
     profile = json.loads(json.dumps(manifest["profile"]))
     policy = profile["temperature_policy"]
     if (
@@ -724,6 +774,7 @@ def prepare_hourly_silver(tables, manifest, *, environment):
         raise ValueError("Unsupported hourly temperature policy.")
 
     def require_counts(actual, expected, label):
+        """Raise an error showing which measured counts differ from the expected totals."""
         differences = {
             name: {"actual": actual.get(name), "expected": value}
             for name, value in expected.items()
@@ -732,6 +783,7 @@ def prepare_hourly_silver(tables, manifest, *, environment):
         if differences:
             raise ValueError(f"{label}: {differences}")
 
+    # Build the mapping, select weather, join ozone and make the calendar and summaries.
     inputs = inspect_hourly_inputs(tables, profile)
     mapping, mapping_evidence = build_yearly_mapping(
         tables, profile, manifest["publication_id"]
@@ -747,6 +799,7 @@ def prepare_hourly_silver(tables, manifest, *, environment):
     )
     monthly, gaps = summarise_hourly_coverage(coverage)
 
+    # Require one selected weather report per hour and account for every eligible report.
     weather_checks = weather.agg(
         F.count("*").alias("hourly_records"),
         F.countDistinct("station_id", "hour_start_utc").alias("distinct_hour_keys"),
@@ -773,6 +826,7 @@ def prepare_hourly_silver(tables, manifest, *, environment):
         "eligible_temperature_hours": F.col("temperature_available"),
         "shared_hours": F.col("shared_available"),
     }
+    # Reconcile calendar totals with observations, matched weather and source evidence.
     coverage_checks = coverage.agg(
         F.count("*").alias("calendar_hours"),
         F.countDistinct("monitor_id", "hour_start_utc").alias("distinct_hour_keys"),
@@ -787,6 +841,7 @@ def prepare_hourly_silver(tables, manifest, *, environment):
         *[F.count(F.when(condition, 1)).alias(name)
           for name, condition in conditions.items()],
     ).first().asDict()
+    # Include leap day when checking the full-year calendar length.
     calendar_hours = (366 if calendar.isleap(profile["year"]) else 365) * 24
     require_counts(coverage_checks, {
         "calendar_hours": calendar_hours,
@@ -798,6 +853,7 @@ def prepare_hourly_silver(tables, manifest, *, environment):
         "eligible_hours_without_source_evidence": 0,
     }, "Calendar coverage")
 
+    # Assigned plus unassignable audit counts must equal the source release's input counts.
     for source, dataset in (
         ("ozone", "ozone_observations"),
         ("temperature", "temperature_reports"),
@@ -812,6 +868,7 @@ def prepare_hourly_silver(tables, manifest, *, environment):
             "source_records": expected, "accounted_records": expected,
         }, f"{source} audit")
 
+    # All twelve monthly summaries must add back to the full calendar totals.
     monthly_metrics = ["calendar_hours", *conditions]
     monthly_checks = monthly.agg(
         F.count("*").alias("months"),
@@ -822,6 +879,7 @@ def prepare_hourly_silver(tables, manifest, *, environment):
         **{name: coverage_checks[name] for name in monthly_metrics},
     }, "Monthly coverage")
 
+    # Check interval lengths and require total gap hours to match the missing-hour counts.
     gap_rows = gaps.groupBy("gap_kind").agg(
         F.count("*").alias("gap_count"),
         F.sum("gap_hours").alias("total_gap_hours"),
@@ -850,6 +908,7 @@ def prepare_hourly_silver(tables, manifest, *, environment):
         }, f"Gap intervals: {kind}")
         gap_checks[kind] = actual
 
+    # Return prepared tables and evidence. Acceptance, staging and publication happen in the notebook.
     return {
         "status": "prepared_unpublished",
         "profile": profile,
