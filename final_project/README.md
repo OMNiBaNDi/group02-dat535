@@ -1,185 +1,118 @@
 # DAT535 final project
 
-> This README still contains historical CP2 notes and needs a final project update.
-> The separate CP1 application has been retired. Use the main notebook for the
-> Bronze, Silver and Gold pipeline. The current workflow summary is below.
+We use PySpark to find periods of elevated ozone at McAdory, Alabama, in 2025.
+We pair EPA ozone readings with NOAA temperature reports from Alabaster and
+record how much of the year has usable data. Temperature provides context for
+the periods, without testing a causal relationship.
 
-The project will combine EPA ozone observations with NOAA temperature
-to produce an elevated-ozone catalogue and an independent coverage
-summary. The core covers one historical year, one development region
-and one reuse region. The current provisional profiles use 2025:
-McAdory–Alabaster in Alabama for development and South DeKalb–Atlanta
-in Georgia for reuse, with one site/station pairing per region.
-Final profile validation and Gold rules remain for later checkpoints.
+## Pipeline
 
-## Current scope: CP2
+- **Bronze:** Keep the five original EPA and NOAA downloads and store all raw
+  columns as strings in reusable Parquet tables.
+- **Silver:** Clean the readings and reference data, select hourly temperature
+  reports, join them to ozone and calculate coverage.
+- **Gold:** Find periods with ozone at or above 0.045 ppm for at least three
+  consecutive UTC hours. Missing ozone breaks a period. Missing temperature does
+  not. The rule and its calibration are saved in [gold_rules.json](config/gold_rules.json).
 
-Implemented:
-- Environment configuration and isolated storage paths.
-- Run identities and shared stage interfaces.
-- A synthetic Spark fixture with result checks and Parquet read-back.
-- Development, PR and controlled-production workflow definitions.
-- Notebook acquisition of EPA/NOAA inputs with source manifests and reuse.
-- One shared availability check for the Alabama and Georgia profiles.
-
-The stage entry points in src/stages.py remain unfinished. The main
-notebook now implements Bronze acquisition and manifests; Silver and Gold
-processing are not implemented.
-
-Earlier manual VM runs verified fixture success and an intentional
-validation failure with a nonzero launcher exit status.
-
-The [development workflow run](https://github.com/OMNiBaNDi/group02-dat535/actions/runs/38471697171)
-for commit `44fc15d` passed on 13 October 2026, including all eight
-configuration tests, standalone Spark fixture execution and artifact
-upload. The downloaded reports confirmed development storage,
-Spark/PySpark 3.5.0, expected fixture results and successful Parquet
-read-back. Fixture output remained unpublished.
-
-Amund merged CP1 at b40b6b8 and verified production and synchronised
-development execution. CP2 acquisition, reuse and both availability checks
-have been verified locally and in a manual VM copy. CP2 is not yet accepted. Terminal notebook execution with NBClient has also
-been checked on the VM. The development workflow also runs the notebook and has passed at commit
-`9f51e18`. The PR workflow adds two offline notebook checks using tiny
-generated files in isolated test storage. Production is configured to run the
-notebook with refresh disabled; at that checkpoint CP2 production verification
-is still pending.
-
-## Project layout
-
-| Location | Purpose |
+| Final table | Contents |
 | --- | --- |
-| `config/` | Environment roots, Spark settings, source URLs and region profiles |
-| `notebooks/pipeline.ipynb` | Main notebook for acquisition, checks and later Silver/Gold work |
-| `src/project_config.py` | Configuration validation and environment selection |
-| `src/run_context.py` | Run ID and derived storage paths |
-| `src/stages.py` | Stage result contract and unfinished stage entry points |
-| `scripts/run_notebook.sh` | Run the notebook on the VM using NBClient |
-| `tests/` | Configuration tests and tiny synthetic input |
-| `docs/` | Maintained project documentation |
+| `period_catalogue` | Period start, end, duration, ozone summaries and accompanying temperatures. |
+| `monthly_coverage` | Monthly data availability, elevated hours and period counts. |
 
-GitHub workflows live at repository root in `.github/workflows/`.
-Historical labs and their `.yml.example` workflows remain inactive.
+## Run the project
 
-## Runtime
+Run all commands below from the repository root. The VM setup expects
+Spark/PySpark 3.5.0 at `/opt/spark`, Python 3.11 at
+`/home/ubuntu/spark-env/bin/python`, Java 8 and the `spark-env` Jupyter kernel.
+Spark uses the standalone master `spark://sparkvm-test:7077` with two cores.
 
-Use the existing Spark VM and runner:
-- Spark 3.5.0 at `/opt/spark`.
-- Python 3.11 at `/home/ubuntu/spark-env/bin/python`.
-- Java 8 at `/usr/lib/jvm/java-8-openjdk-amd64`.
-- Standalone master: `spark://sparkvm-test:7077`.
-
-The notebook runtime loads `config/spark.properties` when starting Spark.
-The driver runs on the VM in client mode; work is submitted to the
-existing standalone master and worker.
-
-The configured allocation is two executor cores, 1 GiB executor memory
-and 1 GiB driver memory. This is a single-VM setup, not evidence of
-multi-machine scaling. The entry point checks that Spark and imported
-PySpark versions match.
-
-## Configuration tests
-
-From the repository root in WSL:
-
-```bash
-python3 -B -m unittest discover \
-  -s final_project/tests \
-  -p 'test_*.py' \
-  -v
-```
-
-These standard-library tests do not require Spark. They check invalid
-configuration, overlapping roots and test-invocation isolation.
-
-## Retired CP1 example
-
-The separate CP1 aggregation application, launcher and input files have been
-removed. They remain available in Git history. The real notebook and Gold tests
-now provide the Spark processing and Parquet checks used by the workflows.
-Existing VM data and earlier Actions artifacts are not deleted by this cleanup.
-
-## Storage
-
-Persistent output is stored on the VM beneath
-`/home/ubuntu/dat535-final-project-data/`, outside Git and runner checkouts.
-
-See [storage-layout.md](docs/storage-layout.md) for environment roots,
-directory purposes and the distinction between staging and publication.
-
-## GitHub Actions
-
-| Workflow file | Trigger | Run storage |
-| --- | --- | --- |
-| `final-project-dev.yml` | Push to `dev` | `dev/` |
-| `final-project-pr.yml` | PR from this repository's `dev` to `main` | `test/pr-<PR-number>-<GitHub-run-id>-<attempt>/` |
-| `final-project-prod.yml` | Push to `main` | `prod/` |
-
-All three use the existing self-hosted runner and run configuration tests.
-Development and production execute the full Bronze, Silver and Gold notebook.
-They upload the notebook reports and the Silver/Gold reports; source datasets
-stay on the VM. PR checks run isolated Gold Spark tests and offline notebook
-checks against GitHub's proposed merge revision. The PR artifact contains the
-offline check report, while Gold test results appear in the Actions log.
-
-The production job references the existing GitHub Environment named
-`main`. Its approval settings are separate from the application's
-`prod` storage selection. Either listed group member can approve;
-self-review prevention is disabled, administrator bypass is enabled,
-and the Environment has no branch restrictions. The production workflow
-itself triggers only on pushes to `main`.
-
-The agreed delivery process is peer-reviewed `dev` to `main` PRs,
-ordinary merge commits and subsequent synchronisation of persistent
-`dev`. These workflow definitions do not themselves enforce PR review.
-
-The notebook runner supplies report locations through `GITHUB_OUTPUT` for
-artifact uploads. Uploads can still run after failure when a report path is
-available and the job has not been cancelled. CP1 artifacts are no longer created.
-
-GitHub artifact copies have 30-day retention. This does not remove persistent
-VM files. Dataset directories are not uploaded by these workflows.
-
-
-## Main notebook
-
-Use `notebooks/pipeline.ipynb` for acquisition and the shared availability
-checks. It will also hold the later Spark Silver and Gold work. Save it,
-restart the Python kernel and run top to bottom from inside the project folder.
-Normal runs reuse published files after checking existence and size. Set
-`PIPELINE_REFRESH_SOURCES=true` in the kernel environment for an explicit
-provider check. Multiple saved versions require a checksum in `source_versions`.
-
-Local WSL uses config/environments.local.json (ignored by Git); configure
-absolute dev/test/prod paths outside the checkout. On the VM, set
-PIPELINE_TARGET=vm in the notebook kernel environment to use
-config/environments.json. PIPELINE_ENVIRONMENT defaults to dev;
-test needs PIPELINE_TEST_RUN_ID.
-The notebook currently uses standard-library Python. Future Spark stages
-must use the documented Spark runtime. The development workflow also runs
-the notebook. See the workflow section above for the current PR and production checks.
-
-For terminal execution on the VM, from the repository root:
+Open [pipeline.ipynb](notebooks/pipeline.ipynb) with a fresh `spark-env` kernel
+for an interactive run, or run the full pipeline with:
 
 ```bash
 bash final_project/scripts/run_notebook.sh --environment dev
 ```
 
-This uses the registered `spark-env` kernel. The executed notebook is saved
-beside that run's report, leaving the source notebook unchanged. The launcher
-also accepts `--test-run-id` for `test` and `--refresh-sources` for an explicit
-provider refresh.
+| Mode | What it runs |
+| --- | --- |
+| `full` (default) | Bronze, Silver and Gold. |
+| `prepare` | Bronze and Silver, stopping after the hourly Silver completion report. |
+| `analyse` | Gold using a selected hourly Silver release. |
 
-Each run writes reports/run.json under its run directory, including on
-acquisition failure. Source manifests retain their original provenance.
-Fresh duplicates of verified stored versions are removed only after
-successful publication; historical staging and failed attempts remain.
+For example, prepare a test release and then analyse it:
 
+```bash
+bash final_project/scripts/run_notebook.sh --environment test --test-run-id example --mode prepare
+bash final_project/scripts/run_notebook.sh --environment test --test-run-id example \
+  --mode analyse --hourly-receipt /path/from/prepare/hourly_silver_completion.json
+```
 
-Normal reuse trusts the recorded header assessment and does not rehash stored
-inputs; treat snapshots/manifests as read-only. New downloads receive SHA-256
-hashes and required-column checks (bronze-columns-v2). Existing v1 manifests
-remain readable. Runs save the effective configuration and record the Git
-revision and uncommitted-change status when available. A copied folder without
-Git metadata is labelled `manual_copy`, with those Git fields left unknown.
-Use committed reviewed code for final reproducibility evidence.
+Use the report path printed by Prepare. Keep the same environment and, for test
+runs, the same test ID. Add `--gold-rules final_project/config/gold_threshold_demo.json`
+to Analyse to try the saved 0.046 ppm threshold.
+
+## Storage and reports
+
+[sources.json](config/sources.json) lists the five input URLs and checksums.
+The selected monitor is `01-073-1005-44201-1` and the station is `USW00053864`.
+Bronze reuses verified Parquet. When conversion is needed, it checks a cached
+download or downloads the configured URL. A checksum mismatch stops the run.
+
+Data stays outside the repository. [environments.json](config/environments.json)
+defines the dev, test and prod roots. Test runs add a subfolder for `--test-run-id`.
+
+Each run has a `runs/<run-id>/reports/` folder for settings, Git/runtime details,
+validation results and completion reports. The runner also saves the executed
+notebook and can save it after a failure when the reports folder is available.
+Saved releases have manifests describing their files and inputs.
+See [storage-layout.md](docs/storage-layout.md) for the full layout.
+
+## Local runs
+
+Use a separate environment with Python 3.11, Java 17, PySpark 3.5.0, `nbformat`,
+`nbclient` and `ipykernel`. Set `JAVA_HOME` to Java 17 and register the kernel
+with that environment's Python:
+
+```bash
+/path/to/local/python -m ipykernel install --sys-prefix --name dat535-local
+```
+
+Provide an environments file with separate absolute dev, test and prod paths
+outside the checkout. Local runs use the test environment and an explicit file:
+
+```bash
+/path/to/local/python -B final_project/src/run_notebook.py \
+  --runtime local --environments-file /path/to/local-environments.json \
+  --environment test --test-run-id local-example --mode full
+```
+
+## Checks
+
+The unit tests cover configuration loading, storage selection and runner defaults:
+
+```bash
+python3 -B -m unittest discover -s final_project/tests -p 'test_*.py' -v
+```
+
+On the VM, run the Gold examples and offline notebook check with:
+
+```bash
+/home/ubuntu/spark-env/bin/python -B final_project/tests/gold_checks.py
+/home/ubuntu/spark-env/bin/python -B final_project/tests/check_notebook.py --test-run-id offline-example
+```
+
+Gold checks use small test tables. Local runs can import the four check functions
+and pass in a local Spark session. The offline check compiles notebook cells,
+parses configuration JSON and tests a column example. Silver checks run in the notebook.
+
+## GitHub Actions
+
+- Pushes to `dev` run the unit tests and Full mode using dev storage.
+- Same-repository `dev` pull requests into `main` run the unit tests, Gold checks
+  and offline notebook check.
+- Pushes to `main` run the unit tests and Full mode using prod storage. The
+  production job uses the `main` GitHub environment.
+
+Workflows use the self-hosted runner and upload report artifacts with 30-day
+retention. Generated datasets stay in the configured storage folders.

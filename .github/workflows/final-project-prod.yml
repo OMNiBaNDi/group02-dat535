@@ -30,7 +30,7 @@ jobs:
           persist-credentials: false
 
       # Fast checks of paths and runner defaults; these do not start Spark.
-      - name: Run configuration tests
+      - name: Run unit tests
         run: |
           /home/ubuntu/spark-env/bin/python -B -m unittest discover \
             -s final_project/tests \
@@ -43,21 +43,11 @@ jobs:
         run: |
           bash final_project/scripts/run_notebook.sh --environment prod
 
-      - name: Upload Bronze reports and executed notebook
+      - name: Upload pipeline reports and executed notebook
         if: ${{ !cancelled() && steps.notebook.outputs.run_root != '' }}
         uses: actions/upload-artifact@v7
         with:
-          name: notebook-prod-${{ github.run_id }}-${{ github.run_attempt }}
+          name: pipeline-prod-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ steps.notebook.outputs.run_root }}/reports/
-          if-no-files-found: error
-          retention-days: 30
-
-      # Despite its name, silver_reports_dir holds both Silver and Gold reports.
-      - name: Upload Silver and Gold reports
-        if: ${{ !cancelled() && steps.notebook.outputs.silver_reports_dir != '' }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: silver-gold-prod-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ steps.notebook.outputs.silver_reports_dir }}
           if-no-files-found: error
           retention-days: 30

@@ -1,4 +1,4 @@
-"""Turn verified hourly Silver into ozone periods and monthly coverage for notebook section 10."""
+"""Turn verified hourly Silver into ozone periods and monthly coverage."""
 
 import json
 import math
@@ -6,25 +6,12 @@ from pathlib import Path
 
 
 def load_gold_rules(path: Path) -> dict:
-    """Read the Gold rule and check the settings used by the detector."""
-    # Read the saved JSON rule into a Python dictionary. Use its fixed threshold;
-    # we do not calculate P90 again for each run.
+    """Read the saved ozone rule and check its settings."""
+    # Use the fixed threshold saved in the rule file.
     rules = json.loads(path.read_text(encoding="utf-8"))
 
-    # Require these settings and the explanation of how the cutoff was chosen.
-    # issubset allows extra fields, but none of these required fields may be missing.
-    required = {"rule_version", "threshold_ppm", "comparison", "minimum_hours", "calibration"}
-    if not isinstance(rules, dict) or not required.issubset(rules):
-        raise ValueError("Gold config must contain the rule settings and calibration record.")
-
-    version = rules["rule_version"]
-    if not isinstance(version, str) or not version.strip():
-        raise ValueError("rule_version must be a non-empty string.")
-
-    # Require a finite number; booleans must not act as numeric thresholds.
+    # Python treats True and False as numbers, but they are not valid thresholds.
     threshold = rules["threshold_ppm"]
-    # Use exact numeric types because Python also treats bool as a subclass of int.
-    # A threshold must not be True, NaN or infinity.
     if type(threshold) not in (int, float) or not math.isfinite(threshold):
         raise ValueError("threshold_ppm must be a finite number.")
 
@@ -36,40 +23,28 @@ def load_gold_rules(path: Path) -> dict:
     if type(hours) is not int or hours < 1:
         raise ValueError("minimum_hours must be a positive integer.")
 
-    if not isinstance(rules["calibration"], dict) or not rules["calibration"]:
-        raise ValueError("calibration must contain the source of the cutoff.")
-
     return rules
 
 def elevated_runs(ozone, rules):
-    """Label elevated hours with their run start and duration. Silver verifies hour keys."""
+    """Find consecutive elevated hours and give each hour its run start and length."""
     from pyspark.sql import Window
     from pyspark.sql import functions as F
 
-    # Input: one eligible ozone observation per monitor and hour, checked by Silver.
-    # Output: the elevated hours, each labelled with its run start and run length.
-    # Keep regions, years and monitors separate. Missing temperature does not break a run.
+    # Silver provides one usable ozone reading per monitor and hour.
+    # Missing temperature does not break an ozone run.
     scope = ["region", "year", "monitor_id"]
     reading = F.col("ozone_ppm")
     cutoff = rules["threshold_ppm"]
     above_cutoff = reading >= cutoff if rules["comparison"] == ">=" else reading > cutoff
-    # where() filters the DataFrame, retaining rows where the condition is true.
     elevated = ozone.where(above_cutoff)
 
-    # Window 1: decide which rows each observation can look at.
-    # partitionBy keeps each region/year/monitor separate; *scope supplies those names.
-    # orderBy puts the elevated observations in time order within each group.
-    # A window keeps individual rows, unlike groupBy(...).agg(), which summarises them.
-    # Only elevated rows remain, so neighbouring rows may be more than an hour apart.
+    # Put each monitor's elevated readings in time order.
+    # There may be gaps because only elevated hours remain.
     timeline = Window.partitionBy(*scope).orderBy("hour_start_utc")
-    # Window 2: for each row, include all earlier rows in its group and the row itself.
-    # This set of rows is called the window frame. We use it to add up run starts.
-    # It follows row positions, not clock time: three rows do not always mean three hours.
+    # Add up run-start markers from the first row through the current row.
     through_this_hour = timeline.rowsBetween(Window.unboundedPreceding, Window.currentRow)
 
-    # F.col refers to a column; cast("long") expresses its timestamps as seconds
-    # since 1970-01-01. Subtracting them gives the gap in seconds.
-    # lag(...).over(timeline) gets the previous elevated timestamp in the same group.
+    # Compare each timestamp with the previous elevated timestamp, using seconds.
     # For hours 10:00, 11:00, 12:00, 14:00, the gaps are null, 3600, 3600, 7200.
     hour_seconds = F.col("hour_start_utc").cast("long")
     previous_seconds = F.lag(hour_seconds).over(timeline)
@@ -78,21 +53,17 @@ def elevated_runs(ozone, rules):
     # Missing and below-threshold hours both leave gaps that start a new run.
     starts_run = F.when(hour_seconds - previous_seconds == 3600, 0).otherwise(1)
 
-    # withColumn adds a calculated column to a new DataFrame, leaving the input alone.
     # The running sum gives hours in the same run the same ID:
     #   hours:       10:00  11:00  12:00  14:00
     #   starts_run:      1      0      0      1
     #   run_id:          1      1      1      2
-    # The second withColumn uses the marker added by the first.
     runs = elevated.withColumn("_starts_run", starts_run).withColumn(
         "_run_id", F.sum("_starts_run").over(through_this_hour)
     )
 
-    # Window 3: group the hours belonging to each complete run. There is no ordering
-    # here, so min and count use every row in that run, not just earlier rows.
-    # For the example above, run_hours becomes [3, 3, 3, 1]. Every row also receives
-    # its run start. Short runs stay here; the notebook filters them out of members.
-    # drop removes the temporary marker and ID columns after they have served their purpose.
+    # Give every hour the start and length of its full run.
+    # The example above produces run lengths [3, 3, 3, 1].
+    # Short runs are included here. The notebook applies minimum_hours afterwards.
     same_run = Window.partitionBy(*scope, "_run_id")
     return (
         runs.withColumn("period_start_utc", F.min("hour_start_utc").over(same_run))
@@ -101,24 +72,23 @@ def elevated_runs(ozone, rules):
     )
 
 def build_period_catalogue(members, ozone, calendar, rules):
-    """Summarise each qualifying period and explain its two boundaries."""
+    """Build one row per qualifying period and record why it starts and ends."""
     from pyspark.sql import functions as F
 
     scope = ["region", "year", "monitor_id", "weather_station_id"]
     # members contains only hours in qualifying runs. These keys keep separate
     # periods and monitor/station mappings from being summarised together.
-    # The star inside the list inserts each scope column into the new list.
     period_key = [*scope, "mapping_id", "mapping_version", "period_start_utc"]
-    # expr reads this Spark SQL duration. Add it to the last member timestamp to get
-    # the exclusive end: hours 10:00, 11:00 and 12:00 form a period [10:00, 13:00).
+    # Add one hour to the last member timestamp for the exclusive end:
+    # hours 10:00, 11:00 and 12:00 form a period [10:00, 13:00).
     # The hour starting at 13:00 is not a member.
     one_hour = F.expr("INTERVAL 1 HOUR")
 
     periods = (
-        # Combine member hours into one row per period. alias names each result column.
-        # count("*") counts hours; count("temperature_c") counts available temperatures.
-        # avg/min/max ignore missing temperatures rather than treating them as zero.
-        # With no temperatures, the statistics are null and temperature coverage is 0%.
+        # Combine the member hours into one row per period.
+        # Count the period's hours and the hours with a temperature reading.
+        # Missing temperatures are left out of the summary statistics.
+        # If all temperatures are missing, the statistics stay null and coverage is 0%.
         members.groupBy(*period_key)
         .agg(
             (F.max("hour_start_utc") + one_hour).alias("period_end_utc"),
@@ -144,9 +114,8 @@ def build_period_catalogue(members, ozone, calendar, rules):
     # Enriched ozone supplies the reading when the hour was eligible.
     hour_key = [*scope, "hour_start_utc"]
     coverage = calendar.withColumnRenamed("station_id", "weather_station_id")
-    # select keeps only lookup keys and relevant fields. The left join retains
-    # calendar hours even when no eligible ozone reading exists. The status tells
-    # us whether an absent value was not observed or was excluded by Silver.
+    # Keep calendar hours without eligible ozone. The status distinguishes readings
+    # excluded by Silver from hours with no assigned source record.
     neighbours = coverage.select(*hour_key, "ozone_status").join(
         ozone.select(*hour_key, "ozone_ppm"), hour_key, "left"
     )
@@ -156,13 +125,10 @@ def build_period_catalogue(members, ozone, calendar, rules):
     # The boundary check must use the same rule: equality is elevated for >=, but not for >.
     below_rule = reading < cutoff if rules["comparison"] == ">=" else reading <= cutoff
 
-    # Check the hour before the start, then the hour at the exclusive end.
-    # A left join retains the period even when that neighbouring hour has no match.
-    # The first matching when condition supplies the explanation; no match gives null.
-    # Use & to combine Spark conditions, rather than Python and.
-    # Boundary labels: year_boundary = outside this year; not_observed = no
-    # assigned source record; excluded = no usable reading; observed_non_elevated
-    # = a usable reading that did not meet the threshold.
+    # Check the hour before the start and the first hour after the period.
+    # The neighbouring hour may be outside the year, have no source record,
+    # contain an excluded reading, or fail the ozone rule.
+    # The left join keeps the period even when that hour has no match.
     for label, lookup_hour in [
         ("start_boundary", F.col("period_start_utc") - one_hour),
         ("end_boundary", F.col("period_end_utc")),
@@ -183,8 +149,7 @@ def build_period_catalogue(members, ozone, calendar, rules):
             .drop("hour_start_utc", "ozone_status", "ozone_ppm")
         )
 
-    # Look for an unexplained boundary. take(1) triggers Spark and returns at most
-    # one matching row to Python. A non-empty list stops publication of this catalogue.
+    # Every boundary must be explained by the calendar or the ozone rule.
     if periods.where("start_boundary IS NULL OR end_boundary IS NULL").take(1):
         raise ValueError("A period boundary does not agree with the hourly Silver data.")
 
@@ -194,18 +159,16 @@ def build_monthly_coverage(silver_months, elevated, members, catalogue):
     """Add Gold hour and period counts to Silver's monthly coverage."""
     from pyspark.sql import functions as F
 
-    # Inputs: Silver monthly coverage, all elevated hours, qualifying member hours,
-    # and one catalogue row per period. Output: the same coverage months with three
-    # Gold counts added. A zero event count with no ozone coverage is not evidence
-    # that ozone stayed low.
+    # elevated includes every hour that meets the ozone rule.
+    # members includes only hours in runs that meet minimum_hours.
+    # catalogue has one row for each qualifying period.
+    # A zero event count with no ozone coverage is not evidence that ozone stayed low.
     month_key = ["region", "year", "monitor_id", "station_id", "month_start_utc"]
 
     def count_by_month(rows, timestamp, count_name):
         """Count hours or period starts in the month of the supplied timestamp column."""
         return (
-            # Use the same station name as Silver. date_trunc maps a timestamp to its month
-            # start, for example April 8 becomes April 1 at 00:00. Count rows for each month
-            # and pairing: the input rows represent either hours or period starts.
+            # Use Silver's station name when grouping hours or period starts by month.
             rows.withColumnRenamed("weather_station_id", "station_id")
             .withColumn("month_start_utc", F.date_trunc("month", timestamp))
             .groupBy(*month_key)
@@ -226,35 +189,29 @@ def build_monthly_coverage(silver_months, elevated, members, catalogue):
         .join(elevated_counts, month_key, "left")
         .join(member_counts, month_key, "left")
         .join(start_counts, month_key, "left")
-        # Fill only missing event counts after the joins; do not turn absent
-        # measurements into zero or overwrite Silver coverage information.
+        # Use zero for months without events.
+        # Leave the measurement and coverage fields from Silver unchanged.
         .fillna(0, subset=["elevated_hours", "qualifying_period_hours", "periods_started"])
     )
 
 
 def summarise_year(monthly):
-    """Pool the monthly counts and describe the observed year."""
+    """Add up the monthly counts and calculate the yearly percentages."""
     from pyspark.sql import functions as F
 
-    # Return one summary row per year and pairing. Sum counts before calculating
-    # percentages, so months with little coverage do not get the same weight as
-    # well-covered months. The caller uses an action such as show to run this plan.
+    # Calculate yearly percentages from the totals instead of averaging monthly percentages.
     counts = [
         "calendar_hours", "eligible_ozone_hours", "eligible_temperature_hours",
         "shared_hours", "ozone_hours_without_temperature",
         "elevated_hours", "qualifying_period_hours", "periods_started",
     ]
-    # The list comprehension builds one sum expression per name; * passes those
-    # expressions as separate agg arguments. Sum counts before computing percentages.
     annual = monthly.groupBy("region", "year", "monitor_id", "station_id").agg(
         *[F.sum(name).alias(name) for name in counts]
     )
 
     def percent(numerator, denominator):
         """Return a percentage for a positive denominator, otherwise null."""
-        # Return a formula Spark applies to each annual row. With no otherwise branch,
-        # a missing or nonpositive denominator gives null instead of a misleading 0%.
-        # Round the calculated percentage to two decimal places.
+        # A missing or nonpositive denominator gives null instead of a misleading 0%.
         return F.when(
             F.col(denominator) > 0,
             F.round(100.0 * F.col(numerator) / F.col(denominator), 2),
@@ -267,8 +224,7 @@ def summarise_year(monthly):
         .withColumn(
             "temperature_calendar_pct", percent("eligible_temperature_hours", "calendar_hours")
         )
-        # This denominator is eligible ozone hours, not all calendar hours. It asks:
-        # of the ozone hours we could use, how many also had eligible temperature?
+        # This is the share of usable ozone hours that also have temperature data.
         .withColumn("temperature_match_pct", percent("shared_hours", "eligible_ozone_hours"))
         .withColumn(
             "outcome",

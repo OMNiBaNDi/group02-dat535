@@ -36,7 +36,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Run configuration tests
+      - name: Run unit tests
         run: |
           /home/ubuntu/spark-env/bin/python -B -m unittest discover \
             -s final_project/tests \
@@ -58,7 +58,7 @@ jobs:
         if: ${{ !cancelled() && steps.notebook_checks.outputs.run_root != '' }}
         uses: actions/upload-artifact@v7
         with:
-          name: cp2-pr-${{ github.event.pull_request.number }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: notebook-check-pr-${{ github.event.pull_request.number }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ steps.notebook_checks.outputs.run_root }}/reports/
           if-no-files-found: error
           retention-days: 30

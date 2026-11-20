@@ -14,7 +14,7 @@ from source_columns import check_columns, required_columns
 
 
 def check_schema():
-    """Check that a complete header passes and a missing required column blocks the source."""
+    """Check the EPA sites header with and without a required column."""
     source = {"source": "epa", "dataset": "sites"}
     columns = required_columns[("epa", "sites")]
     valid = check_columns(source, columns)
@@ -26,13 +26,13 @@ def check_schema():
 
 
 def main():
-    """Check syntax and configuration without running Spark, then save a report for the PR."""
+    """Run the offline checks and save a JSON report."""
     parser = argparse.ArgumentParser(description="Check notebook syntax, input columns and configuration offline.")
     parser.add_argument("--test-run-id", required=True)
     parser.add_argument("--environments-file", type=Path,
                         default=PROJECT_DIR / "config/environments.json")
     args = parser.parse_args()
-    # Always use isolated test storage, even when running this from WSL.
+    # Use the test environment for this check's reports.
     context = create_run_context(args.environments_file, "test", test_run_id=args.test_run_id)
     context.reports_dir.mkdir(parents=True)
     report_path = context.reports_dir / "notebook_checks.json"
@@ -54,13 +54,14 @@ def main():
                     handle.write(f"{name}={value}\n")
 
         notebook_path = PROJECT_DIR / "notebooks/pipeline.ipynb"
+        # Save the notebook checksum so the report identifies the version checked.
         report["notebook_sha256"] = hashlib.sha256(notebook_path.read_bytes()).hexdigest()
-        # Compile checks Python syntax only. It does not download data or execute these cells.
+        # Check each code cell's syntax without running it.
         for cell in json.loads(notebook_path.read_text(encoding="utf-8"))["cells"]:
             if cell["cell_type"] == "code":
                 compile("".join(cell["source"]), str(notebook_path), "exec")
-        # Check that the input configuration files are valid JSON too.
-        for filename in ("sources.json", "alabama_profile.json", "georgia_profile.json"):
+        # Check the JSON syntax of sources.json and alabama_profile.json.
+        for filename in ("sources.json", "alabama_profile.json"):
             json.loads((PROJECT_DIR / "config" / filename).read_text(encoding="utf-8"))
         current_check = "Required columns"
         details = check_schema()

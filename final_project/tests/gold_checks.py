@@ -1,4 +1,8 @@
-"""Run isolated Gold fixtures on the VM with spark-env Python."""
+"""Check Gold calculations and publication with small test datasets.
+
+Direct runs use the VM's spark-env. For local runs, import the functions
+and pass in a Spark session.
+"""
 
 import json
 import sys
@@ -20,7 +24,7 @@ from pyspark.sql import SparkSession, functions as F
 from gold import build_monthly_coverage, build_period_catalogue, elevated_runs, load_gold_rules, summarise_year
 from gold_io import load_gold, publish_gold, stage_gold_table
 from run_context import RunContext
-from silver_files import file_sha256
+from pipeline_files import file_sha256
 
 
 def check_detector(spark):
@@ -41,7 +45,7 @@ def check_detector(spark):
         .withColumn("region", F.lit("fixture"))
         .withColumn("year", F.lit(2025))
     )
-    # This threshold is only for the fixture; it does not change the saved Gold rule.
+    # Use a test threshold without changing the saved Gold rule.
     rules = {"threshold_ppm": 0.050, "comparison": ">=", "minimum_hours": 3}
 
     elevated = elevated_runs(ozone, rules)
@@ -56,6 +60,7 @@ def check_detector(spark):
         .orderBy("hour")
         .collect()
     )
+    # Missing temperature at midnight must not break the three-hour ozone run.
     start = "2025-04-30 23:00"
     assert [tuple(row) for row in actual] == [
         ("A", "2025-04-30 23:00", start),
@@ -136,10 +141,12 @@ def check_catalogue(spark):
     assert (a.min_temperature_c, a.mean_temperature_c, a.max_temperature_c) == (12, 12.5, 13)
     assert (a.start_boundary, a.end_boundary) == ("observed_non_elevated", "not_observed")
 
+    # B starts at the year boundary and has no temperature readings.
     assert (b.start_boundary, b.end_boundary) == ("year_boundary", "excluded")
     assert b.temperature_hours == 0 and b.temperature_coverage_pct == 0
     assert (b.min_temperature_c, b.mean_temperature_c, b.max_temperature_c) == (None, None, None)
     assert b.temperature_summary_reason == "no_eligible_temperature"
+    # C starts after an excluded hour and ends at the year boundary.
     assert (c.start_boundary, c.end_boundary) == ("excluded", "year_boundary")
 
     # A year with no qualifying periods must still return the same table structure.
@@ -148,7 +155,7 @@ def check_catalogue(spark):
     print("PASS: Gold catalogue fixture")
 
 def check_monthly_coverage(spark):
-    """Check month allocation and distinguish missing data from a year with no qualifying periods."""
+    """Check monthly counts and the reasons a year has no qualifying periods."""
     from calendar import monthrange
     from datetime import date
 
@@ -193,6 +200,7 @@ def check_monthly_coverage(spark):
     months = build_monthly_coverage(silver_months, elevated, members, catalogue)
     rows = months.orderBy("month_start_utc").collect()
     assert len(rows) == 12
+    # Count the period start in April and split its hours between April and May.
     for month, row in enumerate(rows, start=1):
         assert row.month_start_utc.month == month
         expected = {4: (1, 1, 1), 5: (3, 2, 0)}.get(month, (0, 0, 0))
@@ -203,7 +211,7 @@ def check_monthly_coverage(spark):
     assert year.periods_started == 1 and year.outcome == "qualifying_periods"
     assert year.temperature_match_pct == 83.33  # Five shared hours out of six eligible.
 
-    # Small annual examples distinguish the three ways to have zero periods.
+    # Check no usable ozone, no elevated hours and runs that are too short.
     cases = spark.createDataFrame(
         [("none", 0, 0), ("low", 4, 0), ("short", 4, 2)],
         "monitor_id string, eligible_ozone_hours int, elevated_hours int",
@@ -225,7 +233,8 @@ def check_monthly_coverage(spark):
 
 
 def check_release(spark, context):
-    """Verify the real stage/load path and an interrupted second table write."""
+    """Check publication, reloading and a failure before the second table is written."""
+    # Use a small parent manifest and simple tables for these publication checks.
     parent = {"kind": "hourly_silver", "status": "published", "environment": "test",
               "publication_id": "fixture", "evidence": {"profile": {"region": "Fixture", "year": 2025}}}
     relative = "published/silver/hourly/fixture/2025/fixture/manifest.json"
@@ -234,7 +243,8 @@ def check_release(spark, context):
     path.write_text(json.dumps(parent), encoding="utf-8")
     digest = file_sha256(path)
     options = dict(parent=parent, parent_path=relative, parent_sha256=digest, context=context,
-                   rules=load_gold_rules(PROJECT / "config/gold_rules.json"))
+                   rules=load_gold_rules(PROJECT / "config/gold_rules.json"),
+                   rule_config_sha256=file_sha256(PROJECT / "config/gold_rules.json"))
     catalogue = spark.createDataFrame([(3, None)], "duration_hours long, note string")
     # Publish both a populated and an empty catalogue, then compare every reloaded value.
     for count in (1, 0):
@@ -249,6 +259,7 @@ def check_release(spark, context):
             assert actual.dtypes == expected.dtypes
             assert not expected.exceptAll(actual).take(1) and not actual.exceptAll(expected).take(1)
 
+    # Check that the loader rejects a wrong manifest checksum.
     try:
         load_gold(release["manifest_path"], expected_sha256="wrong", **load_args)
     except ValueError as error:
@@ -263,8 +274,8 @@ def check_release(spark, context):
             raise OSError("fixture: interrupted second write")
         return stage_gold_table(table, bundle, name)
 
-    # Interrupt the second table write. There must be no new publication manifest,
-    # and the last successful release must still load.
+    # Fail before writing the monthly table.
+    # No new manifest should appear, and the previous release must still load.
     before = set(context.published_root.rglob("manifest.json"))
     with patch("gold_io.stage_gold_table", side_effect=fail_second):
         try:
@@ -279,7 +290,7 @@ def check_release(spark, context):
 
 
 if __name__ == "__main__":
-    # Keep fixture files separate from dev and prod; remove them when the test finishes.
+    # Use a temporary folder for the test files. It is removed when the checks finish.
     with TemporaryDirectory(prefix="dat535-gold-test-") as scratch:
         context = RunContext("test", Path(scratch), "gold-fixture")
         spark = (SparkSession.builder.master("local[2]").appName("DAT535 Gold checks")

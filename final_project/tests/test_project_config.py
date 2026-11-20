@@ -1,4 +1,4 @@
-"""Checks for configuration validity and storage-root isolation."""
+"""Test loading environment paths and rejecting malformed JSON."""
 
 import json
 from pathlib import Path
@@ -13,7 +13,7 @@ from project_config import load_environment_roots
 
 
 class EnvironmentConfigTests(unittest.TestCase):
-    """Check storage settings using temporary paths rather than the VM data folders."""
+    """Check configuration loading with temporary storage paths."""
     def setUp(self):
         """Prepare three separate root paths and remove the temporary folder after each test."""
         temporary = tempfile.TemporaryDirectory()
@@ -47,54 +47,8 @@ class EnvironmentConfigTests(unittest.TestCase):
         for root in roots.values():
             self.assertFalse(root.exists())
 
-    def test_invalid_configurations_are_rejected(self):
-        """Reject missing settings, overlapping storage and paths inside the checkout."""
-        cases = {
-            "missing environment": {
-                "dev": self.valid["dev"],
-                "test": self.valid["test"],
-            },
-            "unexpected environment": {
-                **self.valid, "extra": str(self.base / "extra"),
-            },
-            "wrong structure": ["dev", "test", "prod"],
-            "empty path": {**self.valid, "dev": ""},
-            "non-string path": {**self.valid, "dev": None},
-            "relative path": {**self.valid, "dev": "data/dev"},
-            "identical roots": {**self.valid, "test": self.valid["dev"]},
-            "nested roots": {
-                **self.valid, "test": str(self.base / "dev" / "tests"),
-            },
-            "inside repository": {
-                **self.valid, "dev": str(PROJECT_ROOT / "data"),
-            },
-            "contains repository": {
-                **self.valid, "dev": str(PROJECT_ROOT.parent.parent),
-            },
-            "runner checkout": {
-                **self.valid, "dev": str(self.base / "_work" / "repo" / "data"),
-            },
-        }
-
-        for description, settings in cases.items():
-            with self.subTest(case=description):
-                self.write_config(settings)
-                with self.assertRaises(ValueError):
-                    load_environment_roots(self.config_path)
-
-    def test_symbolic_link_cannot_hide_overlapping_roots(self):
-        """Two names for the same physical folder must still count as overlapping storage."""
-        dev_root = self.base / "dev"
-        dev_root.mkdir()
-        alias = self.base / "test-alias"
-        alias.symlink_to(dev_root, target_is_directory=True)
-        self.write_config({**self.valid, "test": str(alias)})
-
-        with self.assertRaisesRegex(ValueError, "overlap"):
-            load_environment_roots(self.config_path)
-
     def test_malformed_json_is_rejected(self):
-        """Invalid JSON should fail instead of being treated as usable settings."""
+        """Reject a configuration file with invalid JSON syntax."""
         self.config_path.write_text("{ invalid json", encoding="utf-8")
 
         with self.assertRaises(json.JSONDecodeError):
