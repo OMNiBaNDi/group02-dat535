@@ -1,75 +1,80 @@
 # Project storage layout
 
-This document defines the agreed storage conventions.
-It does not imply that all pipeline stages or publication safeguards
-have been implemented.
+Code and configuration belong in Git. Generated data, private verification and
+runtime environments stay outside the repository and runner checkouts.
 
-## Storage locations
+## Environment and run roots
 
-Code, safe configuration, documentation and tiny test fixtures belong
-in the Git repository.
+VM storage is `/home/ubuntu/dat535-final-project-data/{dev,test,prod}`. Each test
+invocation adds `<test-run-id>/` below its test root. Local execution requires an
+explicit file with three non-overlapping absolute roots and uses test storage.
+Existing WSL dev/prod data is not an acceptance-output location.
 
-Persistent project data belongs on the Spark VM under:
-`/home/ubuntu/dat535-final-project-data/`
+One context/run ID covers Bronze, Silver and Gold. A test invocation can contain
+several attempts (including Prepare followed by Analyse), each with a new run ID.
 
-Generated datasets must remain outside Git and the runner's managed
-checkout.
-
-## Environment roots
-
-| Environment | Root on the VM |
+| Relative path | Contents |
 | --- | --- |
-| Development | `/home/ubuntu/dat535-final-project-data/dev/` |
-| Production | `/home/ubuntu/dat535-final-project-data/prod/` |
-| Test invocation | `/home/ubuntu/dat535-final-project-data/test/<test-run-id>/` |
+| `data/bronze/<provider>/<source-name>/<download-sha256>/` | Preserved downloads; historical snapshots may also contain extracted CSV |
+| `published/bronze/<provider>/<source-name>/<original-sha256>/manifest.json` | Historical raw manifests, preserved unchanged |
+| `data/bronze_parquet/<provider>/<source-name>/<download-sha256>/<reader-version>/` | Raw string columns saved as Parquet |
+| `published/bronze_parquet/<provider>/<source-name>/<download-sha256>/<reader-version>/manifest.json` | Completed Bronze version-2 manifest linking download identity and Parquet files |
+| `data/silver/source/<region>/<year>/<publication-id>/` | Eight source tables, including three audits |
+| `data/silver/hourly/<region>/<year>/<publication-id>/` | Six hourly integration/coverage tables |
+| `data/gold/<region>/<year>/<publication-id>/` | Period catalogue and monthly coverage |
+| `published/<layer>/<region>/<year>/<publication-id>/manifest.json` | Completed release metadata; Silver layers are `silver/source` and `silver/hourly`, Gold is `gold` |
+| `staging/<run-id>/` | Incomplete downloads and unpublished Parquet bundles |
+| `runs/<run-id>/reports/` | Effective settings, acquisition/validation reports, completion receipts and executed notebook |
 
-Each test invocation receives its own root. Development, test and
-production must not write into each other's locations.
+## Completion boundaries
 
-## Contents of each environment root
+The five checksums in `sources.json` select accepted downloaded bytes. Bronze
+first opens a completed Parquet version and verifies its listed files. This warm
+path does not read or hash raw downloads or extracted CSV files.
 
-| Relative path | Purpose |
-| --- | --- |
-| `data/bronze/` | Preserved source snapshots |
-| `data/silver/` | Completed Silver dataset versions |
-| `data/gold/` | Completed Gold dataset versions |
-| `staging/<run-id>/<stage>/` | Unfinished downloads or processing outputs |
-| `published/bronze/` | Manifests identifying published Bronze snapshots |
-| `published/silver/` | Manifests identifying validated Silver preparations |
-| `published/gold/` | Manifests identifying validated, paired Gold releases |
-| `runs/<run-id>/logs/` | Execution logs |
-| `runs/<run-id>/reports/` | Run summaries and verification evidence |
+If Parquet is missing, Bronze verifies the original ZIP/CSV/PSV, downloading it
+into staging if necessary. ZIP members are extracted only in the temporary
+conversion directory. Spark completes its Parquet write before that directory
+is removed. The table directory moves to its final location before the new
+manifest is written. A downloaded original remains available after a failed
+conversion. Cached-original acquisition metadata says reused; existing legacy
+retrieval metadata remains in its original manifest.
 
-A test-run ID identifies a test invocation, which may contain several
-pipeline attempts. A run ID identifies one pipeline attempt.
+New row lineage identifies the preserved download. Both existing file/version
+checksum columns use its one source checksum; no temporary CSV path or checksum
+is stored in rows. Parquet files retain their own integrity checksums. Original
+raw manifests, extracted files and historical releases are not migrated.
+The existing `.bronze-publication.lock` directory coordinates the whole phase.
+Abrupt termination can leave a stale lock requiring investigation.
 
-Create directories when needed. A directory's existence alone does not
-mean its contents are complete or approved for downstream use.
+Source/hourly Silver retain their staging, validation and publication contracts.
+Gold stages both tables in a temporary `gold-` directory, reopens them, calculates
+coverage/counts from saved data and moves the bundle before publishing its
+manifest. Its release parent's `.publish.lock` coordinates cooperating publishers.
+Staging/final paths must support the same-filesystem rename used by publication.
 
-## Publication and retention
+A directory alone is not completed. Loaders require explicit manifests/checksums
+and verify their listed files and schemas. Silver also verifies saved row counts;
+Gold calculates counts and coverage on write and uses file hashes on reload.
+Unlisted files are ignored rather than discovered and read. Gold fails on an occupied destination or
+manifest. An orphan destination stays untouched; a fresh attempt normally has a
+new identity. There is no automatic repair or historical-output cleanup.
 
-Staging outputs are not ready for downstream consumption.
-Publication manifests identify completed versions that passed the
-checks required for their layer.
+Preserve original manifests and data. Historical releases are opened using their
+saved manifests and parent links. Gold manifests record dataset keys, files and
+the selected hourly parent. Original ZIP and extracted CSV hashes identify
+distinct files in historical snapshots. Receipts identify exact releases, never
+the newest folder.
 
-Failed attempts must not replace a previous successful publication.
-Preserve the input and output versions needed for recorded-version replay.
-Cleanup rules and ownership must be documented before cleanup is automated.
+## Reports and retention
 
-## GitHub Actions artifacts
+Setup prints the report directory before runtime-dependent operations. All
+layers reuse one effective-config/provenance record (Git revision/dirty status,
+settings and actual runtime), without per-code-file hashes. Analyse records its selected
+receipt and rule; configured sources are not evidence that Bronze ran.
 
-Upload selected reports, manifest copies and small output samples for
-review. Uploading an artifact creates a separate copy on GitHub; it does
-not commit the files to Git or move the VM data.
-
-GitHub artifact retention and VM file retention are independent.
-Selected artifacts are not a complete backup of the project datasets.
-
-## Details introduced by later checkpoints
-
-- CP2 defines Bronze source/dataset/year/version paths.
-- CP3-CP4 define Silver datasets, rejection evidence and preparation paths.
-- CP5 defines Gold dataset and paired-release paths.
-
-Update this document in the same PR as changes to storage conventions.
-Clearly distinguish implemented behaviour from planned behaviour.
+The runner exports `run_id` and `run_root` through `GITHUB_OUTPUT`. Dev/prod each
+upload one report artifact from `run_root/reports/`, including the executed copy
+after failure when a context exists. The PR offline artifact remains separate.
+Artifact retention is 30 days. Reports are not complete dataset backups, and
+artifact expiry does not remove persistent VM files.

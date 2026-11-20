@@ -1,4 +1,4 @@
-"""Small check of the default notebook operation; no Spark session is needed."""
+"""Check the notebook runner's default options without starting Spark."""
 
 import sys
 import unittest
@@ -11,9 +11,9 @@ from run_notebook import build_parser
 
 class RunnerOptionsTests(unittest.TestCase):
     """Check the normal runner defaults used by the development workflow."""
-    def test_normal_dev_run_uses_full_without_refresh(self):
-        """Check that parsing dev options selects Full and leaves forced source refresh off."""
+    def test_normal_dev_run_uses_full_on_vm(self):
+        """Passing only --environment dev should select Full mode and the VM runtime."""
         args = build_parser().parse_args(["--environment", "dev"])
 
         self.assertEqual(args.mode, "full")
-        self.assertFalse(args.refresh_sources)
+        self.assertEqual(args.runtime, "vm")

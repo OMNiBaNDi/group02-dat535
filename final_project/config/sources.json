@@ -3,26 +3,30 @@
     "source": "epa",
     "dataset": "sites",
     "url": "https://aqs.epa.gov/aqsweb/airdata/aqs_sites.zip",
-    "description": "EPA site locations and metadata. Used to locate the ozone sites and describe their surroundings."
+    "description": "EPA site locations and metadata. Used to locate the ozone sites and describe their surroundings.",
+    "expected_sha256": "56b322f6a3d5368d055bce53d0988275c0b27fbcced3d57a6ce8f2e2b539e15a"
   },
   {
     "source": "epa",
     "dataset": "monitors",
     "url": "https://aqs.epa.gov/aqsweb/airdata/aqs_monitors.zip",
-    "description": "EPA monitor details and recording dates. Used to identify ozone monitors and check their available history."
+    "description": "EPA monitor details and recording dates. Used to identify ozone monitors and check their available history.",
+    "expected_sha256": "e8325216d4ec5df462a23c201e6ffa1176b2fce363c9f6b0e3f18ce6ad958525"
   },
   {
     "source": "epa",
     "dataset": "hourly_ozone",
     "year": 2025,
     "url": "https://aqs.epa.gov/aqsweb/airdata/hourly_44201_2025.zip",
-    "description": "Hourly ozone observations for 2025. Used for both Alabama and Georgia to find elevated-ozone periods and report coverage."
+    "description": "Hourly ozone observations for the selected Alabama monitor in 2025.",
+    "expected_sha256": "2b7b9e03b43a2bf20d3c3e78fc8c98b6b349fe2c3c4778382a2997144e7b2fd7"
   },
   {
     "source": "noaa",
     "dataset": "stations",
     "url": "https://www.ncei.noaa.gov/oa/global-historical-climatology-network/hourly/doc/ghcnh-station-list.csv",
-    "description": "NOAA weather station locations and IDs. Used to find nearby stations for the ozone sites."
+    "description": "NOAA weather station locations and IDs. Used to find nearby stations for the ozone sites.",
+    "expected_sha256": "812ea50bd5efd1b9cc09d5800c55825b3d43b3c5aa75ab17b2848f43b1bfaaef"
   },
   {
     "source": "noaa",
@@ -30,14 +34,7 @@
     "year": 2025,
     "station_id": "USW00053864",
     "url": "https://www.ncei.noaa.gov/oa/global-historical-climatology-network/hourly/access/by-year/2025/psv/GHCNh_USW00053864_2025.psv",
-    "description": "Alabaster weather reports for 2025. Used for temperature alongside the McAdory ozone observations in Alabama."
-  },
-  {
-    "source": "noaa",
-    "dataset": "hourly_weather",
-    "year": 2025,
-    "station_id": "USW00013874",
-    "url": "https://www.ncei.noaa.gov/oa/global-historical-climatology-network/hourly/access/by-year/2025/psv/GHCNh_USW00013874_2025.psv",
-    "description": "Atlanta Hartsfield-Jackson weather reports for 2025. Used to check temperature coverage for South DeKalb and the Georgia reuse example."
+    "description": "Alabaster weather reports for 2025. Used for temperature alongside the McAdory ozone observations in Alabama.",
+    "expected_sha256": "2ccd886d5e6ba9b8c502058db047094dc8a76e50bcfd1c3d54f5c458ab97d308"
   }
 ]

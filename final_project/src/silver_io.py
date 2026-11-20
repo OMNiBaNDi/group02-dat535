@@ -1,7 +1,7 @@
 """Open a selected Silver release and check its saved data.
 
 The manifest describes the release: its input, rules, tables and file checksums.
-Source Silver contains cleaned observations and references plus rejection audits.
+Source Silver contains cleaned observations, references and source-record audits.
 Hourly Silver adds the weather match and calendar coverage used by Gold."""
 
 import json
@@ -9,7 +9,7 @@ from pathlib import Path
 
 from pyspark.sql import functions as F
 
-from silver_files import file_sha256, silver_child_path, silver_json_sha256, verify_silver_file_inventory
+from pipeline_files import file_sha256, child_path, json_sha256, verify_file_inventory
 from silver_hourly import usable_hourly_key
 
 
@@ -59,7 +59,7 @@ def load_source_silver(
         "ozone_audit", "temperature_audit", "reference_audit"
     }
     # Require the profile, rules and recorded validation to describe the same bundle.
-    contract_hash = silver_json_sha256(contracts)
+    contract_hash = json_sha256(contracts)
     if (
         manifest["manifest_version"] != 1
         or manifest["kind"] != "source_silver"
@@ -104,7 +104,7 @@ def load_source_silver(
     )
     if (
         manifest["bundle_path"] != f"data/{suffix}"
-        or manifest_path != silver_child_path(
+        or manifest_path != child_path(
             root, f"published/{suffix}/manifest.json"
         )
     ):
@@ -112,11 +112,11 @@ def load_source_silver(
             "The manifest and data locations do not match their publication."
         )
 
-    bundle = silver_child_path(
+    bundle = child_path(
         root, manifest["bundle_path"], must_exist=True
     )
     # Verify every recorded file's size and checksum before Spark reads it.
-    files = verify_silver_file_inventory(bundle, datasets)
+    files = verify_file_inventory(bundle, datasets)
     tables, counts = {}, {}
 
     # Reopen each table and check its schema and count against the saved contract.
@@ -187,11 +187,11 @@ def check_hourly_evidence(evidence):
         or acceptance["mapping_review_flags"] != []
         or acceptance["region"] != profile["region"]
         or acceptance["year"] != profile["year"]
-        or acceptance["profile_sha256"] != silver_json_sha256(profile)
-        or mapping["profile_sha256"] != silver_json_sha256(profile)
-        or acceptance["rules_sha256"] != silver_json_sha256(evidence["rules"])
+        or acceptance["profile_sha256"] != json_sha256(profile)
+        or mapping["profile_sha256"] != json_sha256(profile)
+        or acceptance["rules_sha256"] != json_sha256(evidence["rules"])
         or acceptance["mapping_id"] != mapping["mapping_id"]
-        or mapping["approval_decision_sha256"] != silver_json_sha256(acceptance)
+        or mapping["approval_decision_sha256"] != json_sha256(acceptance)
         or acceptance["source_silver_publication_id"]
         != evidence["source"]["publication_id"]
         or mapping["source_silver_publication_id"]
@@ -248,11 +248,9 @@ def read_hourly_files(bundle, datasets, contracts, *, spark, expected=None):
     """Verify files, schemas, counts and keys; compare full values when expected tables are supplied."""
     if set(datasets) != set(contracts) or set(contracts) != set(hourly_output_keys):
         raise ValueError("The hourly bundle must contain all six datasets.")
-    if spark.conf.get("spark.sql.session.timeZone") != "UTC":
-        raise ValueError("Hourly Silver requires UTC.")
 
-    # Verify the complete file list, rather than reading whatever files happen to be present.
-    paths = verify_silver_file_inventory(bundle, datasets)
+    # Check the listed files and read only those paths.
+    paths = verify_file_inventory(bundle, datasets)
     tables, checks = {}, {}
 
     for name in sorted(contracts):
@@ -327,9 +325,9 @@ def load_hourly_silver(
     check_hourly_evidence(evidence)
 
     # Recalculate the release ID and check that stage, evidence and validation agree.
-    expected_id = silver_json_sha256({
+    expected_id = json_sha256({
         "stage_sha256": manifest["stage_sha256"],
-        "evidence_sha256": silver_json_sha256(evidence),
+        "evidence_sha256": json_sha256(evidence),
     })
     if (
         manifest["manifest_version"] != 1
@@ -338,8 +336,8 @@ def load_hourly_silver(
         or manifest["environment"] != context.environment
         or evidence["profile"] != profile
         or manifest["publication_id"] != expected_id
-        or manifest["evidence_sha256"] != silver_json_sha256(evidence)
-        or manifest["contract_sha256"] != silver_json_sha256(contracts)
+        or manifest["evidence_sha256"] != json_sha256(evidence)
+        or manifest["contract_sha256"] != json_sha256(contracts)
         or manifest["storage"]["format"] != "parquet"
         or validation["status"] != "validated"
         or validation["run_id"] != manifest["run_id"]
@@ -358,7 +356,7 @@ def load_hourly_silver(
     suffix = f"silver/hourly/{region}/{profile['year']}/{expected_id}"
     if (
         manifest["bundle_path"] != f"data/{suffix}"
-        or path != silver_child_path(
+        or path != child_path(
             root, f"published/{suffix}/manifest.json"
         )
     ):
@@ -369,7 +367,7 @@ def load_hourly_silver(
     # Reopen the exact source Silver parent as well as checking the hourly release.
     source = evidence["source"]
     parent, _, _ = load_source_silver(
-        silver_child_path(
+        child_path(
             root, source["manifest_path"], must_exist=True
         ),
         context,
@@ -385,7 +383,7 @@ def load_hourly_silver(
 
     # Reload the six tables without an in-memory preparation to compare against.
     tables, checks = read_hourly_files(
-        silver_child_path(
+        child_path(
             root, manifest["bundle_path"], must_exist=True
         ),
         manifest["datasets"],

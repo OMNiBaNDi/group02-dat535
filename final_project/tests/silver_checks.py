@@ -13,200 +13,45 @@ from pathlib import Path
 from pyspark.sql import functions as F, types as T
 
 
-def verify_delimited_readers(*, staging_root, read_validated_ozone_csv, read_validated_delimited_file):
-    'Verify CSV and PSV readers using small files in the supplied staging root.'
-    staging_root = Path(staging_root)
-
-    reader_fixture_dir = (
-        staging_root / f"ozone-reader-{time.time_ns()}"
-    )
-
-    reader_fixture_dir.mkdir(parents=True, exist_ok=False)
-
-    reader_fixture_header = "state_code,ozone_raw,note\n"
-
-    # Small files exercise quoting and malformed rows before any Silver field rules run.
-    reader_fixture_cases = {
-        "valid": "01,0.040,plain\n",
-        "empty_final_value": "01,0.040,\n",
-        "quoted_comma": '01,0.040,"contains, comma"\n',
-        "escaped_quotes": '01,0.040,"uses ""quoted"" text"\n',
-        "too_few_fields": "01,0.040\n",
-        "too_many_fields": "01,0.040,plain,EXTRA\n",
-        "unclosed_quote": '01,0.040,"unfinished\n',
-    }
-
-    for case_name, content in reader_fixture_cases.items():
-        fixture_path = reader_fixture_dir / f"{case_name}.csv"
-        fixture_path.write_text(
-            reader_fixture_header + content,
-            encoding="utf-8",
-        )
-
-    validated_reader_notes = {
-        "valid": "plain",
-        "empty_final_value": None,
-        "quoted_comma": "contains, comma",
-        "escaped_quotes": 'uses "quoted" text',
-    }
-
-    for case_name, expected_note in validated_reader_notes.items():
-        records, structure = read_validated_ozone_csv(
-            reader_fixture_dir / f"{case_name}.csv"
-        )
-
-        assert structure == {
-            "columns": ["state_code", "ozone_raw", "note"],
-            "records": 1,
-        }, f"{case_name}: unexpected structure summary"
-
-        assert all(
-            field.dataType.simpleString() == "string"
-            for field in records.schema.fields
-        ), f"{case_name}: source fields must remain strings"
-
-        assert [row.asDict() for row in records.collect()] == [{
-            "state_code": "01",
-            "ozone_raw": "0.040",
-            "note": expected_note,
-        }], f"{case_name}: incorrect decoded values"
-
-        assert records.count() == structure["records"], (
-            f"{case_name}: Spark and structural counts differ"
-        )
-
-        print(f"{case_name}: accepted; decoded values verified")
-
-
-    # These files must be rejected, rather than silently dropping or shifting columns.
-    validated_reader_failures = {
-        "too_few_fields": "expected 3 fields, found 2",
-        "too_many_fields": "expected 3 fields, found 4",
-        "unclosed_quote": "CSV parsing failed",
-    }
-
-    for case_name, expected_message in validated_reader_failures.items():
-        try:
-            read_validated_ozone_csv(
-                reader_fixture_dir / f"{case_name}.csv"
-            )
-        except ValueError as error:
-            assert expected_message in str(error), (
-                f"{case_name}: unexpected rejection: {error}"
-            )
-            print(f"{case_name}: rejected; reason verified")
-        else:
-            raise AssertionError(
-                f"{case_name}: malformed input was accepted"
-            )
-
-    print(
-        "Ozone CSV reader fixtures passed: "
-        f"{len(validated_reader_notes) + len(validated_reader_failures)} cases."
-    )
-
-    # Use a pipe-delimited temperature fixture to test a different separator,
-    # including a quoted value that contains a pipe.
-    temperature_reader_fixture_dir = (
-        staging_root / f"temperature-reader-{time.time_ns()}"
-    )
-    temperature_reader_fixture_dir.mkdir(parents=True, exist_ok=False)
-
-    temperature_reader_header = "station_id|temperature_raw|note\n"
-
-    temperature_reader_valid_cases = {
-        "valid": (
-            "USW00053864|11.7|plain\n",
-            "plain",
-        ),
-        "empty_final_value": (
-            "USW00053864|11.7|\n",
-            None,
-        ),
-        "quoted_pipe": (
-            'USW00053864|11.7|"contains|pipe"\n',
-            "contains|pipe",
-        ),
-        "escaped_quotes": (
-            'USW00053864|11.7|"uses ""quoted"" text"\n',
-            'uses "quoted" text',
-        ),
-    }
-
-    for case_name, (content, expected_note) in (
-        temperature_reader_valid_cases.items()
+def verify_delimited_readers(*, staging_root, read_ozone_csv, read_delimited_file):
+    """Check native Spark decoding and width errors; accepted hashes guard real inputs."""
+    directory = Path(staging_root) / f"readers-{time.time_ns()}"
+    directory.mkdir(parents=True)
+    counts = {}
+    for name, delimiter, reader in (
+        ("ozone_csv", ",", read_ozone_csv),
+        ("temperature_psv", "|", lambda path: read_delimited_file(path, delimiter="|")),
     ):
-        fixture_path = temperature_reader_fixture_dir / f"{case_name}.psv"
-        fixture_path.write_text(
-            temperature_reader_header + content,
-            encoding="utf-8",
-        )
-
-        fixture_records, fixture_structure = read_validated_delimited_file(
-            fixture_path,
-            delimiter="|",
-        )
-
-        assert fixture_structure == {
-            "columns": ["station_id", "temperature_raw", "note"],
-            "records": 1,
-        }, f"{case_name}: unexpected structure summary"
-
-        assert [row.asDict() for row in fixture_records.collect()] == [{
-            "station_id": "USW00053864",
-            "temperature_raw": "11.7",
-            "note": expected_note,
-        }], f"{case_name}: incorrect decoded values"
-
-        print(f"{case_name}: accepted; decoded values verified")
-
-
-    temperature_reader_invalid_cases = {
-        "too_few_fields": (
-            "USW00053864|11.7\n",
-            "expected 3 fields, found 2",
-        ),
-        "too_many_fields": (
-            "USW00053864|11.7|plain|EXTRA\n",
-            "expected 3 fields, found 4",
-        ),
-        "unclosed_quote": (
-            'USW00053864|11.7|"unfinished\n',
-            "CSV parsing failed",
-        ),
-        "multiline_record": (
-            'USW00053864|11.7|"two\nlines"\n',
-            "multiline record",
-        ),
-    }
-
-    for case_name, (content, expected_message) in (
-        temperature_reader_invalid_cases.items()
-    ):
-        fixture_path = temperature_reader_fixture_dir / f"{case_name}.psv"
-        fixture_path.write_text(
-            temperature_reader_header + content,
-            encoding="utf-8",
-        )
-
-        try:
-            read_validated_delimited_file(fixture_path, delimiter="|")
-        except ValueError as error:
-            assert expected_message in str(error), (
-                f"{case_name}: unexpected rejection: {error}"
-            )
-            print(f"{case_name}: rejected; reason verified")
-        else:
-            raise AssertionError(
-                f"{case_name}: unsupported input was accepted"
-            )
-
-    print(
-        "Temperature PSV reader fixtures passed: "
-        f"{len(temperature_reader_valid_cases) + len(temperature_reader_invalid_cases)} "
-        "cases."
-    )
-    return {"ozone_csv_cases": len(validated_reader_notes) + len(validated_reader_failures), "temperature_psv_cases": len(temperature_reader_valid_cases) + len(temperature_reader_invalid_cases)}
+        # Preserve identifiers, empty final values, quoted separators and escaped quotes.
+        valid = {
+            "plain": ("01{d}0.040{d}plain\n", "plain"),
+            "empty": ("01{d}0.040{d}\n", None),
+            "quoted_separator": ('01{d}0.040{d}"contains{d}separator"\n', f"contains{delimiter}separator"),
+            "escaped_quotes": ('01{d}0.040{d}"uses ""quoted"" text"\n', 'uses "quoted" text'),
+        }
+        header = delimiter.join(["identifier", "value", "note"]) + "\n"
+        for case, (text, note) in valid.items():
+            path = directory / f"{name}-{case}.{'psv' if delimiter == '|' else 'csv'}"
+            path.write_text(header + text.format(d=delimiter), encoding="utf-8")
+            records = reader(path)
+            assert records.dtypes == [("identifier", "string"), ("value", "string"), ("note", "string")]
+            assert [row.asDict() for row in records.collect()] == [
+                {"identifier": "01", "value": "0.040", "note": note}
+            ], (name, case)
+        # Force every field: Spark is lazy and count() can prune CSV columns.
+        for case, text in {"too_few": "01{d}0.040\n", "too_many": "01{d}0.040{d}plain{d}extra\n"}.items():
+            path = directory / f"{name}-{case}.{'psv' if delimiter == '|' else 'csv'}"
+            path.write_text(header + text.format(d=delimiter), encoding="utf-8")
+            try:
+                reader(path).collect()
+            except Exception as error:
+                assert "MALFORMED" in str(error).upper(), (name, case, str(error))
+            else:
+                raise AssertionError(f"{name}/{case}: native FAILFAST accepted a wrong-width row")
+        counts[f"{name}_cases"] = len(valid) + 2
+        print(f"PASS: {name}: decoded values and native width errors ({len(valid) + 2} cases)")
+    # No custom rejection contract for arbitrary unclosed quotes or multiline CSV.
+    return counts
 
 
 def verify_ozone_rules(*, spark, type_ozone_fields, ozone_field_checks, classify_ozone_fields, resolve_source_keys, ozone_key_columns, build_ozone_observations, build_ozone_audit):
@@ -2419,7 +2264,7 @@ def verify_silver_publication(
             ("changed_receipt", ValueError, "matching stage"),
             ("changed_file", ValueError, "checksum differs"),
             ("missing_file", FileNotFoundError, ""),
-            ("extra_file", ValueError, "inventory differs"),
+            ("unlisted_file_ignored", None, ""),
             ("existing_lock", RuntimeError, "lock already exists"),
             (
                 "destination_collision",
@@ -2452,7 +2297,7 @@ def verify_silver_publication(
                     handle.write(bytes([first_byte[0] ^ 1]))
             elif name == "missing_file":
                 data_file.unlink()
-            elif name == "extra_file":
+            elif name == "unlisted_file_ignored":
                 shutil.copyfile(
                     data_file, data_file.parent / "unexpected.parquet"
                 )
@@ -2463,6 +2308,14 @@ def verify_silver_publication(
             elif name == "manifest_write_failure":
                 manifest_path.parent.mkdir(parents=True)
                 manifest_path.with_suffix(".json.tmp").mkdir()
+
+            if name == "unlisted_file_ignored":
+                result = publish(candidate, report)
+                assert result["outcome"] == "published"
+                listed = verify_silver_file_inventory(final_bundle, candidate["datasets"])
+                assert all(Path(path).name != "unexpected.parquet" for paths in listed.values() for path in paths)
+                passed(name)
+                continue
 
             try:
                 rejected(

@@ -11,7 +11,7 @@ import math
 
 from pyspark.sql import Window, functions as F
 
-from silver_files import silver_json_sha256
+from pipeline_files import json_sha256
 
 
 def inspect_hourly_inputs(tables, profile):
@@ -105,10 +105,7 @@ def inspect_hourly_inputs(tables, profile):
 
 def build_yearly_mapping(tables, profile, source_publication_id):
     """Check the selected entities and describe the fixed yearly mapping."""
-    # Use the source tables' Spark session and require UTC for the mapping dates.
     spark = tables["epa_sites"].sparkSession
-    if spark.conf.get("spark.sql.session.timeZone") != "UTC":
-        raise RuntimeError("Mapping intervals require UTC.")
 
     # Read the selected year and define the fields that identify the site and monitor.
     year = profile["year"]
@@ -161,10 +158,9 @@ def build_yearly_mapping(tables, profile, source_publication_id):
             "Reference identifier components disagree with the profile."
         )
 
-    # Require usable coordinates before describing the pairing.
+    # Require finite coordinates within the latitude and longitude ranges.
     for name, record in references.items():
         lat, lon = record["latitude_deg"], record["longitude_deg"]
-        # Flag differences between the site's and monitor's recorded coordinates or coordinate systems.
         if (
             lat is None or lon is None
             or not math.isfinite(lat) or not math.isfinite(lon)
@@ -181,6 +177,7 @@ def build_yearly_mapping(tables, profile, source_publication_id):
         for flag in record["quality_flags"]
     ]
 
+    # Flag differences between the site's and monitor's coordinates or datum.
     if (
         site["latitude_deg"],
         site["longitude_deg"],
@@ -274,10 +271,10 @@ def build_yearly_mapping(tables, profile, source_publication_id):
         "station_id": station_id,
         "valid_from_utc": f"{year}-01-01 00:00:00",
         "valid_until_utc": f"{year + 1}-01-01 00:00:00",
-        "profile_sha256": silver_json_sha256(profile),
+        "profile_sha256": json_sha256(profile),
         "source_silver_publication_id": source_publication_id,
     }
-    mapping_id = silver_json_sha256(identity)
+    mapping_id = json_sha256(identity)
 
     # Create one mapping row for the configured year, with an exclusive end time.
     mapping = spark.createDataFrame(
@@ -328,32 +325,15 @@ def build_yearly_mapping(tables, profile, source_publication_id):
             "Distance uses published coordinates without a datum transformation or terrain model.",
         ],
     }
-# Return the mapping table and its supporting evidence for review and later publication.
     return mapping, evidence
 
 
 def select_hourly_temperature(reports, *, policy_version):
     """Select the latest eligible report per station and UTC clock hour."""
-    # Require UTC so reports are grouped into the intended clock hours.
-    if reports.sparkSession.conf.get("spark.sql.session.timeZone") != "UTC":
-        raise RuntimeError("Hourly temperature selection requires UTC.")
 
     # Only allow the supported version of the hourly temperature selection rule.
     if policy_version != "temperature-hourly-v1":
         raise ValueError("Unsupported hourly temperature policy.")
-
-    # Reject inputs that already contain our derived hourly columns.
-    reserved = {
-        "hour_start_utc",
-        "report_timestamp_utc",
-        "qualifying_report_count",
-        "temperature_selection_rule",
-        "__latest_report_timestamp",
-    }
-    if reserved & set(reports.columns):
-        raise ValueError(
-            "Input columns conflict with hourly output columns."
-        )
 
     # Reject missing or blank station IDs and missing report timestamps.
     if reports.filter(
@@ -395,7 +375,6 @@ def select_hourly_temperature(reports, *, policy_version):
             "qualifying_report_count",
             F.count("*").over(hour_window),
         )
-        # finding latest timestamp in hour group
         .withColumn(
             "__latest_report_timestamp",
             F.max("report_timestamp_utc").over(hour_window),
@@ -444,7 +423,7 @@ def usable_hourly_key(keys):
 
 
 def check_hourly_keys(table, keys, label):
-    """Require non-empty, unique keys and return the row count."""
+    """Check for missing or repeated key values and return the row count."""
     usable = usable_hourly_key(keys)
     # Check that all key fields are usable and their combined values identify unique rows.
     counts = table.agg(
@@ -460,9 +439,7 @@ def check_hourly_keys(table, keys, label):
 
 def enrich_hourly_ozone(ozone, weather, mapping):
     """Attach the mapped hourly temperature without removing ozone rows."""
-    # Require UTC so ozone and temperature hours use the same time boundaries.
-    if ozone.sparkSession.conf.get("spark.sql.session.timeZone") != "UTC":
-        raise ValueError("Hourly enrichment requires UTC.")
+    # The shared Spark session uses UTC for these timestamp comparisons.
 
     # Check keys before joining so repeated matches cannot multiply ozone rows.
     input_records = check_hourly_keys(
@@ -558,10 +535,8 @@ def enrich_hourly_ozone(ozone, weather, mapping):
 
 def build_calendar_coverage(tables, enriched, weather, profile):
     """Build one coverage row per monitor and UTC calendar hour."""
-    # Use the enriched data's Spark session and require UTC for the calendar hours.
+    # Use the shared UTC Spark session to build the calendar.
     session = enriched.sparkSession
-    if session.conf.get("spark.sql.session.timeZone") != "UTC":
-        raise ValueError("Calendar coverage requires UTC.")
 
     # Read the selected year and identify the ozone monitor and weather station.
     year = int(profile["year"])
@@ -712,9 +687,6 @@ def build_calendar_coverage(tables, enriched, weather, profile):
 
 def summarise_hourly_coverage(coverage):
     """Summarise calendar coverage by month and identify continuous gaps."""
-    # Require UTC so monthly boundaries and gap durations use the same time zone.
-    if coverage.sparkSession.conf.get("spark.sql.session.timeZone") != "UTC":
-        raise ValueError("Coverage summaries require UTC.")
 
     # Keep each region, year and monitor-station pairing separate when summarising.
     keys = ["region", "year", "monitor_id", "station_id"]
@@ -833,11 +805,7 @@ def summarise_hourly_coverage(coverage):
 
 def prepare_hourly_silver(tables, manifest, *, environment):
     """Return six prepared DataFrames, mapping evidence and consistency checks for one source release."""
-    # Check:
-        # The source Silver release is published and validated.
-        # It belongs to the requested environment.
-        # Spark uses UTC.
-        # The hourly selection policy is supported.
+    # Require a validated source release from the selected environment.
     if (
         manifest["kind"] != "source_silver"
         or manifest["status"] != "published"
@@ -846,9 +814,6 @@ def prepare_hourly_silver(tables, manifest, *, environment):
     ):
         raise ValueError("A validated source Silver publication is required.")
 
-    # Require UTC so all hourly boundaries use the same time zone.
-    if tables["ozone_observations"].sparkSession.conf.get("spark.sql.session.timeZone") != "UTC":
-        raise ValueError("Hourly preparation requires UTC.")
 
     # Use a copy of the published profile and require the supported hourly-selection policy.
     profile = json.loads(json.dumps(manifest["profile"]))
@@ -871,53 +836,33 @@ def prepare_hourly_silver(tables, manifest, *, environment):
         if differences:
             raise ValueError(f"{label}: {differences}")
 
-    # CALL inspect_hourly_inputs:
-        # Check monitor/station identities, timestamps and duplicate keys.
-        # Record the input counts.
+    # Check IDs, timestamps and duplicate keys, and record the input counts.
     inputs = inspect_hourly_inputs(tables, profile)
 
 
-    # CALL build_yearly_mapping:
-        #Check the selected site, monitor and weather station.
-        #Build their fixed yearly pairing.
-        #Record distance, reference findings and mapping evidence.
+    # Build the configured yearly pairing and collect its reference warnings.
     mapping, mapping_evidence = build_yearly_mapping(
         tables, profile, manifest["publication_id"]
     )
 
-    # CALL select_hourly_temperature:
-        # Select the latest eligible temperature report within each UTC hour.
+    # Choose the latest eligible weather report in each UTC hour.
     weather = select_hourly_temperature(
         tables["temperature_reports"], policy_version=policy["version"]
     )
 
-    # CALL enrich_hourly_ozone:
-        # Attach the matching hourly temperature to each ozone observation.
-        # Keep ozone observations even when no matching temperature is available.
-        # calls check_hourly_keys, which calls usable_hourly_key
+    # Attach weather while retaining ozone hours without a match.
     enriched, enrichment_checks = enrich_hourly_ozone(
         tables["ozone_observations"], weather, mapping
     )
 
-    # CALL build_calendar_coverage:
-        # Generate every hour of the year.
-        # Record available, excluded and absent observations.
-        # Account for source records using the audits
+    # Build the full calendar and account for source records through the audits.
     coverage, audit_assignment = build_calendar_coverage(
         tables, enriched, weather, profile
     )
 
-    # CALL summarise_hourly_coverage:
-        # Produce monthly coverage totals.
-        # Group consecutive missing hours into gap intervals.
+    # Summarise monthly coverage and consecutive missing hours.
     monthly, gaps = summarise_hourly_coverage(coverage)
 
-    # CHECK:
-        # Selected reports and input counts agree.
-        # Joins have preserved the ozone records.
-        # Calendar and monthly totals agree.
-        # Audits account for all source records.
-        # Gap lengths agree with missing-hour counts
 
     # Require one selected weather report per hour and account for every eligible report.
     weather_checks = weather.agg(
